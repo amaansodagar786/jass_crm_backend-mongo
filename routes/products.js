@@ -34,7 +34,7 @@ router.post("/create-product", async (req, res) => {
         // Create product
         const product = new Product({
             ...req.body,
-            discount: req.body.discount || 0,
+            discount: 0, // Always set discount to 0
             category: req.body.category
         });
 
@@ -109,7 +109,7 @@ router.post("/bulk-upload-products", async (req, res) => {
                     hsnCode: productData.hsnCode || null,
                     taxSlab: productData.taxSlab ? Number(productData.taxSlab) : 0,
                     price: productData.price ? Number(productData.price) : 0,
-                    discount: productData.discount ? Number(productData.discount) : 0,
+                    discount: 0, // Always set discount to 0
                 };
 
                 const product = new Product(cleanedData);
