@@ -87,6 +87,9 @@ router.post("/bulk-upload-products", async (req, res) => {
                     continue;
                 }
 
+                // Normalize category to lowercase
+                const normalizedCategory = category.toLowerCase();
+
                 // Check for existing product name
                 const existingByName = await Product.findOne({ productName });
 
@@ -98,21 +101,19 @@ router.post("/bulk-upload-products", async (req, res) => {
                     continue;
                 }
 
-                // Normalize product data
+                // Normalize product data with lowercase category
                 const cleanedData = {
                     ...productData,
+                    category: normalizedCategory, // Use normalized category
                     barcode: productData.barcode || null,
                     hsnCode: productData.hsnCode || null,
                     taxSlab: productData.taxSlab ? Number(productData.taxSlab) : 0,
                     price: productData.price ? Number(productData.price) : 0,
                     discount: productData.discount ? Number(productData.discount) : 0,
-                    category: productData.category
                 };
 
                 const product = new Product(cleanedData);
                 const savedProduct = await product.save();
-
-                // Create inventory entry for the new product
                 await createInventoryEntry(savedProduct);
 
                 results.successful.push(savedProduct.toObject());
@@ -158,6 +159,10 @@ router.put("/update-product/:productId", async (req, res) => {
     try {
         const { productId } = req.params;
         const { _id, createdAt, updatedAt, ...updateData } = req.body;
+
+        if (updateData.category) {
+            updateData.category = updateData.category.toLowerCase();
+        }
 
         // Convert numeric fields to numbers
         if (updateData.taxSlab !== undefined) {
