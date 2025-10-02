@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const User = require("../models/user");
+const Category = require("../models/category");
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const auth = require('../routes/auth');
@@ -191,6 +192,248 @@ router.delete('/users/:userId', auth, async (req, res) => {
     console.error("Delete error:", error);
     res.status(500).json({ 
       message: "Delete failed", 
+      error: error.message 
+    });
+  }
+});
+
+// Category Management Routes
+
+// Get all categories
+router.get('/categories', auth, async (req, res) => {
+  try {
+    // Check if user is admin
+    // if (!req.user.permissions || !req.user.permissions.includes('admin')) {
+    //   return res.status(403).json({ message: 'Access denied. Admin required.' });
+    // }
+
+    const categories = await Category.find({}).sort({ createdAt: -1 });
+    res.json(categories);
+  } catch (error) {
+    console.error('Error fetching categories:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Create single category
+router.post('/categories', auth, async (req, res) => {
+  try {
+    // Check if user is admin
+    // if (!req.user.permissions || !req.user.permissions.includes('admin')) {
+    //   return res.status(403).json({ message: 'Access denied. Admin required.' });
+    // }
+
+    const { name } = req.body;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ 
+        message: "Category name is required",
+        field: "name"
+      });
+    }
+
+    // Convert to lowercase and trim
+    const categoryName = name.trim().toLowerCase();
+
+    // Check if category already exists
+    const existingCategory = await Category.findOne({ name: categoryName });
+    if (existingCategory) {
+      return res.status(400).json({ 
+        message: "Category already exists",
+        field: "name"
+      });
+    }
+
+    // Create new category
+    const category = new Category({
+      name: categoryName
+    });
+
+    const savedCategory = await category.save();
+    
+    res.status(201).json({
+      message: "Category created successfully",
+      category: savedCategory
+    });
+  } catch (error) {
+    console.error("Category creation error:", error);
+    
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({
+        message: "Validation error",
+        error: error.message
+      });
+    }
+    
+    res.status(500).json({ 
+      message: "Category creation failed", 
+      error: error.message 
+    });
+  }
+});
+
+// Create multiple categories at once
+router.post('/categories/bulk', auth, async (req, res) => {
+  try {
+    // Check if user is admin
+    if (!req.user.permissions || !req.user.permissions.includes('admin')) {
+      return res.status(403).json({ message: 'Access denied. Admin required.' });
+    }
+
+    const { categories } = req.body;
+
+    if (!categories || !Array.isArray(categories) || categories.length === 0) {
+      return res.status(400).json({ 
+        message: "Categories array is required and must not be empty"
+      });
+    }
+
+    const results = {
+      successful: [],
+      failed: []
+    };
+
+    // Process each category
+    for (const categoryData of categories) {
+      try {
+        const { name } = categoryData;
+
+        if (!name || !name.trim()) {
+          results.failed.push({
+            name: name || 'undefined',
+            error: "Category name is required"
+          });
+          continue;
+        }
+
+        // Convert to lowercase and trim
+        const categoryName = name.trim().toLowerCase();
+
+        // Check if category already exists
+        const existingCategory = await Category.findOne({ name: categoryName });
+        if (existingCategory) {
+          results.failed.push({
+            name: categoryName,
+            error: "Category already exists"
+          });
+          continue;
+        }
+
+        // Create new category
+        const category = new Category({
+          name: categoryName
+        });
+
+        const savedCategory = await category.save();
+        results.successful.push(savedCategory);
+
+      } catch (error) {
+        results.failed.push({
+          name: categoryData.name || 'undefined',
+          error: error.message
+        });
+      }
+    }
+
+    res.status(201).json({
+      message: "Bulk category creation completed",
+      results
+    });
+  } catch (error) {
+    console.error("Bulk category creation error:", error);
+    res.status(500).json({ 
+      message: "Bulk category creation failed", 
+      error: error.message 
+    });
+  }
+});
+
+// Update category
+router.put('/categories/:categoryId', auth, async (req, res) => {
+  try {
+    // Check if user is admin
+    if (!req.user.permissions || !req.user.permissions.includes('admin')) {
+      return res.status(403).json({ message: 'Access denied. Admin required.' });
+    }
+
+    const { categoryId } = req.params;
+    const { name } = req.body;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ 
+        message: "Category name is required",
+        field: "name"
+      });
+    }
+
+    // Convert to lowercase and trim
+    const categoryName = name.trim().toLowerCase();
+
+    // Find category
+    const category = await Category.findOne({ categoryId });
+    if (!category) {
+      return res.status(404).json({ message: 'Category not found' });
+    }
+
+    // Check if new name already exists (excluding current category)
+    const existingCategory = await Category.findOne({ 
+      name: categoryName,
+      categoryId: { $ne: categoryId }
+    });
+    if (existingCategory) {
+      return res.status(400).json({ 
+        message: "Category name already exists",
+        field: "name"
+      });
+    }
+
+    // Update category
+    category.name = categoryName;
+    const updatedCategory = await category.save();
+    
+    res.json({
+      message: "Category updated successfully",
+      category: updatedCategory
+    });
+  } catch (error) {
+    console.error("Category update error:", error);
+    
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({
+        message: "Validation error",
+        error: error.message
+      });
+    }
+    
+    res.status(500).json({ 
+      message: "Category update failed", 
+      error: error.message 
+    });
+  }
+});
+
+// Delete category
+router.delete('/categories/:categoryId', auth, async (req, res) => {
+  try {
+    // Check if user is admin
+    if (!req.user.permissions || !req.user.permissions.includes('admin')) {
+      return res.status(403).json({ message: 'Access denied. Admin required.' });
+    }
+
+    const { categoryId } = req.params;
+
+    // Delete category
+    const deletedCategory = await Category.findOneAndDelete({ categoryId });
+    
+    if (!deletedCategory) {
+      return res.status(404).json({ message: 'Category not found' });
+    }
+    
+    res.json({ message: "Category deleted successfully" });
+  } catch (error) {
+    console.error("Category delete error:", error);
+    res.status(500).json({ 
+      message: "Category delete failed", 
       error: error.message 
     });
   }

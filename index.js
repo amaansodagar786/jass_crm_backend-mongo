@@ -30,6 +30,7 @@ const InvoiceRoutes = require("./routes/invoiceRoutes");
 const adminRoutes = require('./routes/admin');
 const customerRoutes = require("./routes/customerRoutes");
 const authRoutes = require("./routes/authRoutes");
+const ReportRoutes = require("./routes/reports");
 
 
 
@@ -39,6 +40,7 @@ app.use('/products', ProductsRoutes);
 app.use("/invoices", InvoiceRoutes);
 app.use('/admin', adminRoutes);
 app.use('/inventory', inventoryRoutes);
+app.use('/report', ReportRoutes);
 
 // app.use('/vendors', vendorRoutes);
 // app.use('/items', itemRoutes);

@@ -3,6 +3,7 @@ const router = express.Router();
 const Inventory = require("../models/inventory");
 const Product = require("../models/product");
 const ProductDisposal = require("../models/ProductDisposal");
+const InventoryCleanupService = require("../routes/inventoryCleanupService");
 const multer = require('multer');
 const XLSX = require('xlsx');
 const fs = require('fs');
@@ -10,7 +11,7 @@ const fs = require('fs');
 const upload = multer({ dest: 'uploads/' });
 
 // Get all inventory with product details
-// Get all inventory with product details and disposal info
+
 router.get("/get-inventory", async (req, res) => {
     try {
         const inventory = await Inventory.find({}).sort({ createdAt: -1 });
@@ -46,7 +47,7 @@ router.get("/get-inventory", async (req, res) => {
                     });
                 });
 
-                // Enrich batches with disposal info
+                // Enrich batches with disposal info INCLUDING PRICE
                 const enrichedBatches = item.batches.map(batch => {
                     const disposals = batchDisposals[batch.batchNumber] || [];
                     const totalDisposedFromBatch = disposals.reduce((sum, d) => sum + d.quantity, 0);
@@ -56,7 +57,8 @@ router.get("/get-inventory", async (req, res) => {
                         disposals: disposals,
                         totalDisposed: totalDisposedFromBatch,
                         currentQuantity: batch.quantity,
-                        originalQuantity: batch.quantity + totalDisposedFromBatch
+                        originalQuantity: batch.quantity + totalDisposedFromBatch,
+                        price: batch.price // INCLUDE PRICE IN RESPONSE
                     };
                 });
 
@@ -71,6 +73,7 @@ router.get("/get-inventory", async (req, res) => {
                     discount: product?.discount || 0,
                     totalQuantity: item.totalQuantity,
                     batches: enrichedBatches,
+                    priceHistory: item.priceHistory || [],
                     totalDisposed: totalProductDisposed,
                     status: item.totalQuantity === 0 ? "Out of Stock" :
                         item.totalQuantity <= 10 ? "Low Stock" : "In Stock",
@@ -97,55 +100,193 @@ router.get("/get-inventory", async (req, res) => {
 // Add batches to product
 router.post("/add-batches", async (req, res) => {
     try {
-        const { productId, batches } = req.body;
+        console.log("🔍 ADD-BATCHES REQUEST BODY:", req.body);
 
-        if (!productId || !Array.isArray(batches)) {
+        const { productId, batches, price } = req.body;
+
+        if (!productId || !Array.isArray(batches) || !price) {
+            console.log("❌ VALIDATION FAILED - Missing required fields");
+            console.log("   productId:", productId);
+            console.log("   batches:", batches);
+            console.log("   price:", price);
             return res.status(400).json({
                 success: false,
-                message: "Product ID and batches array are required"
+                message: "Product ID, batches array, and price are required"
             });
         }
 
         // Find the product
         const product = await Product.findOne({ productId });
         if (!product) {
+            console.log("❌ PRODUCT NOT FOUND:", productId);
             return res.status(404).json({
                 success: false,
                 message: "Product not found"
             });
         }
 
+        console.log("✅ PRODUCT FOUND:", product.productName);
+
         // Find or create inventory entry
         let inventoryItem = await Inventory.findOne({ productId });
+        console.log("📦 INVENTORY ITEM:", inventoryItem ? "Found" : "Creating new");
 
         if (!inventoryItem) {
             inventoryItem = new Inventory({
                 productId: product.productId,
                 productName: product.productName,
                 category: product.category,
+                priceHistory: [],
                 batches: []
             });
         }
 
-        // Add new batches with both manufacture and expiry dates
-        const newBatches = batches.map(batch => ({
-            batchNumber: batch.batchNumber,
-            quantity: batch.quantity,
-            manufactureDate: new Date(batch.manufactureDate),
-            expiryDate: new Date(batch.expiryDate),
-            addedAt: new Date()
-        }));
+        let addedBatches = 0;
+        let updatedBatches = 0;
+        const errors = [];
+        const newBatchNumbers = [];
 
-        inventoryItem.batches.push(...newBatches);
+        console.log("🔄 PROCESSING BATCHES:", batches);
+
+        // Process batches
+        for (const batch of batches) {
+            try {
+                console.log("   Processing batch:", batch.batchNumber);
+
+                // Validate required fields
+                if (!batch.batchNumber || !batch.quantity || !batch.manufactureDate) {
+                    errors.push({
+                        batchNumber: batch.batchNumber || 'N/A',
+                        message: "Missing required fields",
+                        details: "Batch Number, Quantity, and Manufacture Date are required"
+                    });
+                    continue;
+                }
+
+                // Parse year-month format (YYYY-MM) to Date object (first day of month)
+                const manufactureDate = new Date(batch.manufactureDate + '-01');
+                if (isNaN(manufactureDate.getTime())) {
+                    errors.push({
+                        batchNumber: batch.batchNumber,
+                        message: "Invalid manufacture date format",
+                        details: `Expected YYYY-MM format, got: ${batch.manufactureDate}`
+                    });
+                    continue;
+                }
+
+                // Calculate expiry date (36 months from manufacture)
+                const expiryDate = new Date(manufactureDate);
+                expiryDate.setMonth(expiryDate.getMonth() + 36);
+
+                console.log("   Manufacture Date:", manufactureDate);
+                console.log("   Expiry Date:", expiryDate);
+
+                const existingBatchIndex = inventoryItem.batches.findIndex(
+                    b => b.batchNumber === batch.batchNumber
+                );
+
+                if (existingBatchIndex !== -1) {
+                    // Compare only year and month for existing batches
+                    const newManufacture = manufactureDate.toISOString().substring(0, 7); // YYYY-MM
+                    const existingManufacture = new Date(inventoryItem.batches[existingBatchIndex].manufactureDate)
+                        .toISOString().substring(0, 7);
+
+                    console.log("   New Manufacture:", newManufacture, "Existing:", existingManufacture);
+
+                    if (newManufacture !== existingManufacture) {
+                        console.log("   ❌ DIFFERENT MANUFACTURE DATE");
+                        errors.push({
+                            batchNumber: batch.batchNumber,
+                            message: "Batch already exists with different manufacture date",
+                            details: `Existing manufacture date: ${existingManufacture}, New manufacture date: ${newManufacture}`
+                        });
+                        continue;
+                    } else {
+                        console.log("   ✅ SAME DATE - UPDATING QUANTITY");
+                        inventoryItem.batches[existingBatchIndex].quantity += parseInt(batch.quantity);
+                        updatedBatches++;
+                        console.log(`✅ Updated existing batch ${batch.batchNumber} - Added ${batch.quantity} units`);
+                    }
+                } else {
+                    console.log("   ✅ NEW BATCH - ADDING");
+                    const newBatch = {
+                        batchNumber: batch.batchNumber,
+                        quantity: parseInt(batch.quantity),
+                        manufactureDate: manufactureDate,
+                        expiryDate: expiryDate,
+                        addedAt: new Date()
+                    };
+
+                    inventoryItem.batches.push(newBatch);
+                    newBatchNumbers.push(batch.batchNumber);
+                    addedBatches++;
+                    console.log(`✅ Added new batch ${batch.batchNumber} with ${batch.quantity} units`);
+                }
+            } catch (batchError) {
+                console.error(`Error processing batch ${batch.batchNumber}:`, batchError);
+                errors.push({
+                    batchNumber: batch.batchNumber || 'N/A',
+                    message: "Batch processing error",
+                    details: batchError.message
+                });
+            }
+        }
+
+        console.log("📊 BATCH PROCESSING RESULTS:");
+        console.log("   Added:", addedBatches, "Updated:", updatedBatches, "Errors:", errors.length);
+
+        // ADD PRICE TO HISTORY (only for newly added batches, not updated ones)
+        if (addedBatches > 0) {
+            const totalQuantityAdded = batches
+                .filter(batch => newBatchNumbers.includes(batch.batchNumber))
+                .reduce((sum, batch) => sum + parseInt(batch.quantity), 0);
+
+            inventoryItem.priceHistory.push({
+                price: parseFloat(price),
+                quantityAdded: totalQuantityAdded,
+                batchNumbers: newBatchNumbers,
+                addedAt: new Date()
+            });
+            console.log(`💰 Added price history: ${totalQuantityAdded} units @ ₹${price}`);
+        }
+
+        // ✅ FIX: Allow success even if only updates happened (no new batches)
+        if (errors.length > 0 && addedBatches === 0 && updatedBatches === 0) {
+            console.log("❌ ALL BATCHES FAILED VALIDATION");
+            return res.status(400).json({
+                success: false,
+                message: "All batches failed validation",
+                errors: errors
+            });
+        }
+
         await inventoryItem.save();
+        console.log("💾 INVENTORY SAVED SUCCESSFULLY");
+
+        // ✅ FIX: Return success even if only updates happened
+        let successMessage = "";
+        if (addedBatches > 0 && updatedBatches > 0) {
+            successMessage = `Batches processed successfully. Added: ${addedBatches}, Updated: ${updatedBatches}`;
+        } else if (addedBatches > 0) {
+            successMessage = `Batches added successfully. Added: ${addedBatches}`;
+        } else if (updatedBatches > 0) {
+            successMessage = `Batches updated successfully. Updated: ${updatedBatches}`;
+        }
+
+        console.log("🎯 SENDING SUCCESS RESPONSE:", successMessage);
 
         res.status(200).json({
             success: true,
-            message: "Batches added successfully",
+            message: successMessage,
+            addedBatches,
+            updatedBatches,
+            price: price,
+            errors: errors.length > 0 ? errors : undefined,
             data: inventoryItem
         });
+
     } catch (error) {
-        console.error("Error adding batches:", error);
+        console.error("💥 ERROR IN ADD-BATCHES:", error);
         res.status(500).json({
             success: false,
             message: "Failed to add batches",
@@ -154,8 +295,7 @@ router.post("/add-batches", async (req, res) => {
     }
 });
 
-// Bulk upload batches from Excel
-
+// Bulk upload batches from Excel (UPDATED FOR YEAR-MONTH)
 router.post("/bulk-upload-batches", upload.single('file'), async (req, res) => {
     try {
         if (!req.file) {
@@ -175,34 +315,41 @@ router.post("/bulk-upload-batches", upload.single('file'), async (req, res) => {
         console.log("Excel data first row:", data[0]);
 
         let addedBatches = 0;
+        let updatedBatches = 0;
         const errors = [];
 
         // Get all products first for better matching
         const allProducts = await Product.find({});
         console.log("Available products count:", allProducts.length);
 
+        // Track price history for each product
+        const productPriceHistory = {};
+
         for (const [index, row] of data.entries()) {
             try {
-                const rowNumber = index + 2; // +2 because Excel rows start at 1 and header is row 1
+                const rowNumber = index + 2;
                 const productName = row['Product Name'];
                 const batchNumber = row['Batch Number'];
                 const quantity = row['Quantity'];
-                const manufactureDate = row['Manufacture Date'];
+                const manufactureDateInput = row['Manufacture Date'];
+                const price = row['Price'];
 
                 console.log(`Processing row ${rowNumber}:`, {
                     productName,
                     batchNumber,
                     quantity,
-                    manufactureDate
+                    manufactureDateInput,
+                    price
                 });
 
-                // Validate required fields with structured errors
-                if (!productName || !batchNumber || !quantity || !manufactureDate) {
+                // Validate required fields including PRICE
+                if (!productName || !batchNumber || !quantity || !manufactureDateInput || !price) {
                     const missingFields = [];
                     if (!productName) missingFields.push('Product Name');
                     if (!batchNumber) missingFields.push('Batch Number');
                     if (!quantity) missingFields.push('Quantity');
-                    if (!manufactureDate) missingFields.push('Manufacture Date');
+                    if (!manufactureDateInput) missingFields.push('Manufacture Date');
+                    if (!price) missingFields.push('Price');
 
                     errors.push({
                         rowNumber: rowNumber,
@@ -226,15 +373,65 @@ router.post("/bulk-upload-batches", upload.single('file'), async (req, res) => {
                     continue;
                 }
 
-                // Validate manufacture date
-                const manufacture = new Date(manufactureDate);
-                if (isNaN(manufacture.getTime())) {
+                // Validate price is a positive number
+                if (isNaN(price) || parseFloat(price) <= 0) {
+                    errors.push({
+                        rowNumber: rowNumber,
+                        productName: productName,
+                        batchNumber: batchNumber,
+                        message: "Invalid price",
+                        details: `Price must be a positive number, got: ${price}`
+                    });
+                    continue;
+                }
+
+                // Parse manufacture date (handle different formats)
+                let manufactureDate;
+
+                if (typeof manufactureDateInput === "number") {
+                    // Handle Excel date numbers
+                    const excelDate = XLSX.SSF.parse_date_code(manufactureDateInput);
+                    manufactureDate = new Date(excelDate.y, excelDate.m - 1, 1);
+                } else if (typeof manufactureDateInput === "string") {
+                    // Handle string formats
+                    if (manufactureDateInput.match(/^\d{4}-\d{2}$/)) {
+                        // YYYY-MM format
+                        manufactureDate = new Date(manufactureDateInput + '-01');
+                    } else if (manufactureDateInput.match(/^\d{1,2}\/\d{1,2}\/\d{4}$/)) {
+                        // MM/DD/YYYY format - extract year and month only
+                        const [month, day, year] = manufactureDateInput.split('/');
+                        manufactureDate = new Date(year, month - 1, 1);
+                    } else {
+                        // Try to parse as full date, then extract year-month
+                        manufactureDate = new Date(manufactureDateInput);
+                        if (!isNaN(manufactureDate.getTime())) {
+                            // Set to first day of month
+                            manufactureDate = new Date(manufactureDate.getFullYear(), manufactureDate.getMonth(), 1);
+                        }
+                    }
+                }
+
+                if (!manufactureDate || isNaN(manufactureDate.getTime())) {
                     errors.push({
                         rowNumber: rowNumber,
                         productName: productName,
                         batchNumber: batchNumber,
                         message: "Invalid manufacture date",
-                        details: `Manufacture date must be a valid date, got: ${manufactureDate}`
+                        details: `Manufacture date must be in YYYY-MM format, got: ${manufactureDateInput}`
+                    });
+                    continue;
+                }
+
+                // Validate manufacture date is not in the future
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+                if (manufactureDate > today) {
+                    errors.push({
+                        rowNumber: rowNumber,
+                        productName: productName,
+                        batchNumber: batchNumber,
+                        message: "Manufacture date cannot be in the future",
+                        details: `Manufacture date: ${manufactureDate.toISOString().substring(0, 7)}`
                     });
                     continue;
                 }
@@ -250,7 +447,7 @@ router.post("/bulk-upload-batches", upload.single('file'), async (req, res) => {
                         productName: productName,
                         batchNumber: batchNumber,
                         message: "Product not found",
-                        details: `Product "${productName}" does not exist in the system. Available products: ${allProducts.map(p => p.productName).join(', ')}`
+                        details: `Product "${productName}" does not exist in the system.`
                     });
                     continue;
                 }
@@ -265,55 +462,72 @@ router.post("/bulk-upload-batches", upload.single('file'), async (req, res) => {
                         productId: product.productId,
                         productName: product.productName,
                         category: product.category,
+                        priceHistory: [],
                         batches: []
                     });
                     console.log(`Created new inventory for product: ${product.productName}`);
                 }
 
-                // Check if batch already exists
-                const existingBatch = inventoryItem.batches.find(
-                    b => b.batchNumber === batchNumber.trim()
-                );
-
-                if (existingBatch) {
-                    errors.push({
-                        rowNumber: rowNumber,
-                        productName: productName,
-                        batchNumber: batchNumber,
-                        message: "Batch number already exists",
-                        details: `Batch "${batchNumber}" already exists for product "${productName}"`
-                    });
-                    continue;
+                // Initialize price history tracking for this product
+                if (!productPriceHistory[product.productId]) {
+                    productPriceHistory[product.productId] = {
+                        price: parseFloat(price),
+                        quantityAdded: 0,
+                        batchNumbers: []
+                    };
                 }
 
                 // Calculate expiry date (36 months from manufacture)
-                const expiry = new Date(manufacture);
-                expiry.setMonth(expiry.getMonth() + 36);
+                const expiryDate = new Date(manufactureDate);
+                expiryDate.setMonth(expiryDate.getMonth() + 36);
 
-                // Add batch
-                inventoryItem.batches.push({
-                    batchNumber: batchNumber.trim(),
-                    quantity: parseInt(quantity),
-                    manufactureDate: manufacture,
-                    expiryDate: expiry,
-                    addedAt: new Date()
-                });
+                // Check if batch already exists with same manufacture month
+                const existingBatchIndex = inventoryItem.batches.findIndex(
+                    b => b.batchNumber === batchNumber.trim()
+                );
+
+                if (existingBatchIndex !== -1) {
+                    const existingBatch = inventoryItem.batches[existingBatchIndex];
+                    const newManufactureMonth = manufactureDate.toISOString().substring(0, 7); // YYYY-MM
+                    const existingManufactureMonth = new Date(existingBatch.manufactureDate).toISOString().substring(0, 7);
+
+                    if (newManufactureMonth !== existingManufactureMonth) {
+                        errors.push({
+                            rowNumber: rowNumber,
+                            productName: productName,
+                            batchNumber: batchNumber,
+                            message: "Batch already exists with different manufacture date",
+                            details: `Existing manufacture date: ${existingManufactureMonth}, New manufacture date: ${newManufactureMonth}`
+                        });
+                        continue;
+                    } else {
+                        // Same batch name and same manufacture month - update quantity
+                        inventoryItem.batches[existingBatchIndex].quantity += parseInt(quantity);
+                        updatedBatches++;
+                        console.log(`Updated existing batch ${batchNumber} for product ${product.productName}`);
+                    }
+                } else {
+                    // Add new batch
+                    inventoryItem.batches.push({
+                        batchNumber: batchNumber.trim(),
+                        quantity: parseInt(quantity),
+                        manufactureDate: manufactureDate,
+                        expiryDate: expiryDate,
+                        addedAt: new Date()
+                    });
+
+                    // Track for price history
+                    productPriceHistory[product.productId].quantityAdded += parseInt(quantity);
+                    productPriceHistory[product.productId].batchNumbers.push(batchNumber.trim());
+
+                    addedBatches++;
+                    console.log(`Added new batch ${batchNumber} to product ${product.productName}`);
+                }
 
                 // Update total quantity
                 inventoryItem.totalQuantity = inventoryItem.batches.reduce((sum, batch) => sum + batch.quantity, 0);
 
-                // Update status based on total quantity
-                if (inventoryItem.totalQuantity === 0) {
-                    inventoryItem.status = "Out of Stock";
-                } else if (inventoryItem.totalQuantity <= 10) {
-                    inventoryItem.status = "Low Stock";
-                } else {
-                    inventoryItem.status = "In Stock";
-                }
-
                 await inventoryItem.save();
-                console.log(`Added batch ${batchNumber} to product ${product.productName}`);
-                addedBatches++;
 
             } catch (error) {
                 console.error(`Error processing row ${index + 2}:`, error);
@@ -327,16 +541,34 @@ router.post("/bulk-upload-batches", upload.single('file'), async (req, res) => {
             }
         }
 
+        // ADD PRICE HISTORY FOR ALL PRODUCTS AFTER PROCESSING ALL ROWS
+        for (const [productId, priceData] of Object.entries(productPriceHistory)) {
+            if (priceData.quantityAdded > 0) {
+                const inventoryItem = await Inventory.findOne({ productId: productId });
+                if (inventoryItem) {
+                    inventoryItem.priceHistory.push({
+                        price: priceData.price,
+                        quantityAdded: priceData.quantityAdded,
+                        batchNumbers: priceData.batchNumbers,
+                        addedAt: new Date()
+                    });
+                    await inventoryItem.save();
+                    console.log(`Added price history for product ${productId}: ${priceData.quantityAdded} units @ ₹${priceData.price}`);
+                }
+            }
+        }
+
         // Clean up uploaded file
         fs.unlinkSync(req.file.path);
 
-        console.log(`Bulk upload completed. Added ${addedBatches} batches. Errors: ${errors.length}`);
+        console.log(`Bulk upload completed. Added: ${addedBatches} batches, Updated: ${updatedBatches} batches. Errors: ${errors.length}`);
 
         res.status(200).json({
             success: true,
-            message: `Bulk upload completed. Added ${addedBatches} batches with ${errors.length} errors.`,
+            message: `Bulk upload completed. Added: ${addedBatches}, Updated: ${updatedBatches}, Errors: ${errors.length}`,
             addedBatches,
-            errors: errors, // Send all structured errors
+            updatedBatches,
+            errors: errors,
             totalErrors: errors.length
         });
 
@@ -363,8 +595,6 @@ router.post("/bulk-upload-batches", upload.single('file'), async (req, res) => {
     }
 });
 
-
-// Dispose products (defective or expired)
 
 
 // Dispose products (defective or expired)
@@ -553,6 +783,47 @@ router.get("/disposal-history", async (req, res) => {
         res.status(500).json({
             success: false,
             message: "Failed to fetch disposal history",
+            error: error.message
+        });
+    }
+});
+
+
+// Run automated cleanup
+router.post("/run-cleanup", async (req, res) => {
+    try {
+        const results = await InventoryCleanupService.performCleanup();
+
+        res.status(200).json({
+            success: true,
+            message: `Cleanup completed successfully`,
+            data: results
+        });
+
+    } catch (error) {
+        console.error("Cleanup error:", error);
+        res.status(500).json({
+            success: false,
+            message: "Cleanup failed",
+            error: error.message
+        });
+    }
+});
+
+// Get cleanup statistics
+router.get("/cleanup-stats", async (req, res) => {
+    try {
+        const stats = await InventoryCleanupService.getCleanupStats();
+
+        res.status(200).json({
+            success: true,
+            data: stats
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: "Failed to get cleanup stats",
             error: error.message
         });
     }

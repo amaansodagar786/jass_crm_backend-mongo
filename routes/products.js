@@ -407,4 +407,93 @@ router.put("/bulk-update-discounts", async (req, res) => {
     }
 });
 
+
+// Individual price update
+router.put("/update-price/:productId", async (req, res) => {
+    try {
+        const { productId } = req.params;
+        const { price } = req.body;
+
+        // Validate price value
+        if (price === undefined || price === null) {
+            return res.status(400).json({
+                message: "Price value is required"
+            });
+        }
+
+        const priceValue = Number(price);
+        if (isNaN(priceValue) || priceValue < 0) {
+            return res.status(400).json({
+                message: "Price must be a positive number"
+            });
+        }
+
+        const updatedProduct = await Product.findOneAndUpdate(
+            { productId: productId },
+            { price: priceValue },
+            {
+                new: true,
+                runValidators: true
+            }
+        );
+
+        if (!updatedProduct) {
+            return res.status(404).json({
+                message: "Product not found"
+            });
+        }
+
+        res.status(200).json({
+            message: "Price updated successfully",
+            product: updatedProduct.toObject()
+        });
+    } catch (error) {
+        console.error("Error updating price:", error);
+        res.status(500).json({
+            message: "Failed to update price",
+            error: error.message
+        });
+    }
+});
+
+// Bulk price update
+router.put("/bulk-update-prices", async (req, res) => {
+    try {
+        const { prices } = req.body;
+
+        if (!Array.isArray(prices)) {
+            return res.status(400).json({
+                message: "Prices array is required"
+            });
+        }
+
+        const updateOperations = prices.map(item => ({
+            updateOne: {
+                filter: { productId: item.productId },
+                update: { price: item.price }
+            }
+        }));
+
+        const result = await Product.bulkWrite(updateOperations);
+
+        // Fetch updated products
+        const updatedProductIds = prices.map(item => item.productId);
+        const updatedProducts = await Product.find({
+            productId: { $in: updatedProductIds }
+        });
+
+        res.status(200).json({
+            message: `Successfully updated ${result.modifiedCount} products`,
+            updatedCount: result.modifiedCount,
+            products: updatedProducts
+        });
+    } catch (error) {
+        console.error("Error in bulk price update:", error);
+        res.status(500).json({
+            message: "Failed to update prices",
+            error: error.message
+        });
+    }
+});
+
 module.exports = router;

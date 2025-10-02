@@ -11,18 +11,36 @@ const inventorySchema = new mongoose.Schema({
     type: String,
     required: true,
     ref: 'Product',
-    // index: true 
   },
   productName: {
     type: String,
     required: true,
-    // index: true 
   },
   category: {
     type: String,
     required: true,
-    // index: true 
   },
+  // ADD PRICE HISTORY ARRAY
+  priceHistory: [{
+    price: {
+      type: Number,
+      required: true,
+      min: 0.01
+    },
+    quantityAdded: {
+      type: Number,
+      required: true,
+      min: 1
+    },
+    batchNumbers: [{
+      type: String,
+      required: true
+    }],
+    addedAt: {
+      type: Date,
+      default: Date.now
+    }
+  }],
   batches: [{
     batchNumber: {
       type: String,
@@ -33,7 +51,7 @@ const inventorySchema = new mongoose.Schema({
       required: true,
       min: 0
     },
-     manufactureDate: {
+    manufactureDate: {
       type: Date,
       required: true
     },
@@ -45,6 +63,7 @@ const inventorySchema = new mongoose.Schema({
       type: Date,
       default: Date.now
     }
+    // NO PRICE IN BATCHES - price is at inventory level
   }],
   totalQuantity: {
     type: Number,
@@ -61,7 +80,7 @@ inventorySchema.index({ productName: 1 });
 inventorySchema.index({ category: 1 });
 
 // Update totalQuantity when batches change
-inventorySchema.pre('save', function(next) {
+inventorySchema.pre('save', function (next) {
   this.totalQuantity = this.batches.reduce((total, batch) => total + batch.quantity, 0);
   next();
 });

@@ -10,7 +10,7 @@ router.post("/create-customer", async (req, res) => {
     // Only check for existing customer if email is provided
     if (email) {
       const existingCustomer = await Customer.findOne({ email });
-      
+
       if (existingCustomer) {
         return res.status(400).json({
           message: "Customer with this email already exists",
@@ -21,21 +21,21 @@ router.post("/create-customer", async (req, res) => {
 
     const customer = new Customer(req.body);
     const savedCustomer = await customer.save();
-    
+
     // Convert to plain object to match DynamoDB structure
     const response = savedCustomer.toObject();
     res.status(201).json(response);
-    
+
   } catch (error) {
     console.error("Error creating customer:", error);
-    
+
     if (error.name === 'ValidationError') {
       return res.status(400).json({
         message: "Validation error",
         error: error.message
       });
     }
-    
+
     res.status(500).json({
       message: "Failed to create customer",
       error: error.message
@@ -47,16 +47,16 @@ router.post("/create-customer", async (req, res) => {
 router.get("/get-customers", async (req, res) => {
   try {
     const customers = await Customer.find({}).sort({ createdAt: -1 });
-    
+
     // Convert to plain objects to match previous structure
     const plainCustomers = customers.map(customer => customer.toObject());
-    
+
     res.status(200).json(plainCustomers);
   } catch (error) {
     console.error("Error fetching customers:", error);
-    res.status(500).json({ 
-      message: "Failed to fetch customers", 
-      error: error.message 
+    res.status(500).json({
+      message: "Failed to fetch customers",
+      error: error.message
     });
   }
 });
@@ -69,7 +69,7 @@ router.put("/update-customer/:id", async (req, res) => {
     const updatedCustomer = await Customer.findOneAndUpdate(
       { customerId: req.params.id },
       updateData,
-      { 
+      {
         new: true, // Return updated document
         runValidators: true // Run schema validators
       }
@@ -84,14 +84,14 @@ router.put("/update-customer/:id", async (req, res) => {
     res.status(200).json(updatedCustomer.toObject());
   } catch (error) {
     console.error("Error updating customer:", error);
-    
+
     if (error.name === 'ValidationError') {
       return res.status(400).json({
         message: "Validation error",
         error: error.message
       });
     }
-    
+
     res.status(500).json({
       message: "Failed to update customer",
       error: error.message
@@ -102,8 +102,8 @@ router.put("/update-customer/:id", async (req, res) => {
 // DELETE delete-customer/:id - Delete customer
 router.delete("/delete-customer/:id", async (req, res) => {
   try {
-    const deletedCustomer = await Customer.findOneAndDelete({ 
-      customerId: req.params.id 
+    const deletedCustomer = await Customer.findOneAndDelete({
+      customerId: req.params.id
     });
 
     if (!deletedCustomer) {
@@ -112,14 +112,14 @@ router.delete("/delete-customer/:id", async (req, res) => {
       });
     }
 
-    res.status(200).json({ 
-      message: "Customer deleted successfully" 
+    res.status(200).json({
+      message: "Customer deleted successfully"
     });
   } catch (error) {
     console.error("Error deleting customer:", error);
-    res.status(500).json({ 
-      message: "Failed to delete customer", 
-      error: error.message 
+    res.status(500).json({
+      message: "Failed to delete customer",
+      error: error.message
     });
   }
 });
@@ -128,7 +128,7 @@ router.delete("/delete-customer/:id", async (req, res) => {
 router.get("/get-customer/:id", async (req, res) => {
   try {
     const customer = await Customer.findOne({ customerId: req.params.id });
-    
+
     if (!customer) {
       return res.status(404).json({
         message: "Customer not found"
@@ -138,9 +138,107 @@ router.get("/get-customer/:id", async (req, res) => {
     res.status(200).json(customer.toObject());
   } catch (error) {
     console.error("Error fetching customer:", error);
-    res.status(500).json({ 
-      message: "Failed to fetch customer", 
-      error: error.message 
+    res.status(500).json({
+      message: "Failed to fetch customer",
+      error: error.message
+    });
+  }
+});
+
+
+// POST bulk-create-customers - Create multiple customers from Excel
+router.post("/bulk-create-customers", async (req, res) => {
+  try {
+    const { customers } = req.body;
+
+    if (!customers || !Array.isArray(customers) || customers.length === 0) {
+      return res.status(400).json({
+        message: "No customer data provided"
+      });
+    }
+
+    const results = {
+      successful: [],
+      failed: []
+    };
+
+    // Process each customer
+    for (const customerData of customers) {
+      try {
+        const { email, contactNumber, customerName } = customerData;
+
+        // Validate required fields
+        if (!customerName || !contactNumber) {
+          results.failed.push({
+            customer: customerData,
+            error: "Customer name and mobile number are required"
+          });
+          continue;
+        }
+
+        // Validate mobile number format
+        if (!/^[0-9]{10}$/.test(contactNumber)) {
+          results.failed.push({
+            customer: customerData,
+            error: "Mobile number must be exactly 10 digits"
+          });
+          continue;
+        }
+
+        // Validate email format if provided
+        if (email && !/^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(email)) {
+          results.failed.push({
+            customer: customerData,
+            error: "Invalid email format"
+          });
+          continue;
+        }
+
+        // Check for existing customer by email (if email provided)
+        if (email) {
+          const existingCustomer = await Customer.findOne({ email });
+          if (existingCustomer) {
+            results.failed.push({
+              customer: customerData,
+              error: "Customer with this email already exists"
+            });
+            continue;
+          }
+        }
+
+        // Check for existing customer by mobile number
+        const existingByMobile = await Customer.findOne({ contactNumber });
+        if (existingByMobile) {
+          results.failed.push({
+            customer: customerData,
+            error: "Customer with this mobile number already exists"
+          });
+          continue;
+        }
+
+        // Create new customer
+        const customer = new Customer(customerData);
+        const savedCustomer = await customer.save();
+        results.successful.push(savedCustomer.toObject());
+
+      } catch (error) {
+        results.failed.push({
+          customer: customerData,
+          error: error.message
+        });
+      }
+    }
+
+    res.status(200).json({
+      message: `Bulk import completed: ${results.successful.length} successful, ${results.failed.length} failed`,
+      results
+    });
+
+  } catch (error) {
+    console.error("Error in bulk customer creation:", error);
+    res.status(500).json({
+      message: "Failed to process bulk customer import",
+      error: error.message
     });
   }
 });

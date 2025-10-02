@@ -239,4 +239,98 @@ router.put("/update-invoice/:invoiceNumber", async (req, res) => {
   }
 });
 
+
+// POST bulk-import-invoices - FIXED VERSION (Groups items by invoice)
+router.post("/bulk-import-invoices", async (req, res) => {
+  try {
+    const { invoices } = req.body;
+
+    if (!invoices || !Array.isArray(invoices) || invoices.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No invoice data provided"
+      });
+    }
+
+    const results = {
+      successful: [],
+      failed: []
+    };
+
+    // Group invoices by invoiceNumber to handle multiple items
+    const invoiceMap = new Map();
+
+    invoices.forEach(invoiceData => {
+      const invoiceNumber = invoiceData.invoiceNumber;
+
+      if (!invoiceMap.has(invoiceNumber)) {
+        // Create new invoice entry
+        invoiceMap.set(invoiceNumber, {
+          ...invoiceData,
+          items: [] // Initialize empty items array
+        });
+      }
+
+      // Add all items to the same invoice
+      if (invoiceData.items && invoiceData.items.length > 0) {
+        invoiceMap.get(invoiceNumber).items.push(...invoiceData.items);
+      }
+    });
+
+    const groupedInvoices = Array.from(invoiceMap.values());
+
+    // Process each grouped invoice
+    for (const invoiceData of groupedInvoices) {
+      try {
+        const originalInvoiceNumber = invoiceData.invoiceNumber;
+
+        // Check if invoice already exists
+        const existingInvoice = await Invoice.findOne({
+          invoiceNumber: originalInvoiceNumber
+        });
+
+        if (existingInvoice) {
+          results.failed.push({
+            invoiceNumber: originalInvoiceNumber,
+            error: "Invoice already exists"
+          });
+          continue;
+        }
+
+        // Create invoice with all items
+        const invoice = new Invoice({
+          ...invoiceData,
+          invoiceNumber: originalInvoiceNumber,
+          createdAt: invoiceData.createdAt || new Date(),
+          updatedAt: invoiceData.updatedAt || new Date()
+        });
+
+        const savedInvoice = await invoice.save();
+        results.successful.push(savedInvoice.toObject());
+
+      } catch (error) {
+        results.failed.push({
+          invoiceNumber: invoiceData.invoiceNumber || 'Unknown',
+          error: error.message
+        });
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Bulk import completed: ${results.successful.length} successful, ${results.failed.length} failed`,
+      results
+    });
+
+  } catch (error) {
+    console.error("Error in bulk invoice import:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to process bulk invoice import",
+      error: error.message
+    });
+  }
+});
+
+
 module.exports = router;
