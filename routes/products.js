@@ -62,6 +62,7 @@ router.post("/create-product", async (req, res) => {
 });
 
 // Bulk Upload Products (Updated with Inventory)
+// Bulk Upload Products (Updated with Inventory)
 router.post("/bulk-upload-products", async (req, res) => {
     try {
         const products = req.body;
@@ -69,12 +70,14 @@ router.post("/bulk-upload-products", async (req, res) => {
 
         for (const productData of products) {
             try {
-                const { productName, category } = productData;
+                const { productName, category, barcode } = productData;
 
+                // Validate required fields
                 if (!productName) {
                     results.failed.push({
                         product: productData,
-                        reason: "Missing productName"
+                        reason: "Missing productName",
+                        field: "productName"
                     });
                     continue;
                 }
@@ -82,50 +85,75 @@ router.post("/bulk-upload-products", async (req, res) => {
                 if (!category) {
                     results.failed.push({
                         product: productData,
-                        reason: "Missing category"
+                        reason: "Missing category",
+                        field: "category"
                     });
                     continue;
                 }
-
-                // Normalize category to lowercase
-                const normalizedCategory = category.toLowerCase();
 
                 // Check for existing product name
                 const existingByName = await Product.findOne({ productName });
-
                 if (existingByName) {
                     results.failed.push({
                         product: productData,
-                        reason: "Product with this name already exists"
+                        reason: "Product with this name already exists",
+                        field: "productName",
+                        existingProduct: existingByName.productId
                     });
                     continue;
                 }
 
-                // Normalize product data with lowercase category
+                
+
+                // Normalize product data
                 const cleanedData = {
                     ...productData,
-                    category: normalizedCategory, // Use normalized category
+                    category: category.toLowerCase(),
                     barcode: productData.barcode || null,
                     hsnCode: productData.hsnCode || null,
                     taxSlab: productData.taxSlab ? Number(productData.taxSlab) : 0,
                     price: productData.price ? Number(productData.price) : 0,
-                    discount: 0, // Always set discount to 0
+                    discount: 0,
                 };
 
                 const product = new Product(cleanedData);
                 const savedProduct = await product.save();
                 await createInventoryEntry(savedProduct);
 
-                results.successful.push(savedProduct.toObject());
+                results.successful.push({
+                    product: savedProduct.toObject(),
+                    message: "Successfully created"
+                });
+
             } catch (error) {
+                // Handle specific validation errors
+                let errorMessage = error.message;
+                let errorField = "general";
+
+                if (error.name === 'ValidationError') {
+                    const firstError = Object.values(error.errors)[0];
+                    errorMessage = firstError.message;
+                    errorField = firstError.path;
+                }
+
                 results.failed.push({
                     product: productData,
-                    reason: error.message
+                    reason: errorMessage,
+                    field: errorField,
+                    errorType: error.name
                 });
             }
         }
 
-        res.status(200).json(results);
+        res.status(200).json({
+            message: `Bulk upload completed: ${results.successful.length} successful, ${results.failed.length} failed`,
+            summary: {
+                total: products.length,
+                successful: results.successful.length,
+                failed: results.failed.length
+            },
+            results
+        });
     } catch (error) {
         console.error("Error in bulk upload:", error);
         res.status(500).json({
