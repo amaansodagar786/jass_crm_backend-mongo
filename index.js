@@ -61,7 +61,7 @@ app.use('/report', ReportRoutes);
 
 // Basic Route
 app.get('/', (req, res) => {
-  res.send('Hello  from Jass Perfumes Inventory Backend !');
+  res.send('Hello World from Jass Perfumes Inventory Backend !');
 });
 
 // Server
