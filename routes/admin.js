@@ -15,14 +15,14 @@ router.get('/users', auth, async (req, res) => {
     }
 
     const users = await User.find({}).sort({ createdAt: -1 });
-    
+
     // Convert to plain objects and remove passwords
     const usersWithoutPasswords = users.map(user => {
       const userObj = user.toObject();
       delete userObj.password;
       return userObj;
     });
-    
+
     res.json(usersWithoutPasswords);
   } catch (error) {
     console.error('Error fetching users:', error);
@@ -43,7 +43,7 @@ router.post('/register', auth, async (req, res) => {
     // Check if user already exists
     const existingUser = await User.findOne({ email });
     if (existingUser) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: "Email already registered",
         field: "email"
       });
@@ -63,11 +63,11 @@ router.post('/register', auth, async (req, res) => {
     });
 
     const savedUser = await user.save();
-    
+
     // Remove password from response
     const userResponse = savedUser.toObject();
     delete userResponse.password;
-    
+
     res.status(201).json({
       message: "User registered successfully",
       user: {
@@ -81,22 +81,22 @@ router.post('/register', auth, async (req, res) => {
     });
   } catch (error) {
     console.error("Registration error:", error);
-    
+
     if (error.name === 'ValidationError') {
       return res.status(400).json({
         message: "Validation error",
         error: error.message
       });
     }
-    
-    res.status(500).json({ 
-      message: "Registration failed", 
-      error: error.message 
+
+    res.status(500).json({
+      message: "Registration failed",
+      error: error.message
     });
   }
 });
 
-// Update user (admin only)
+// uPDATE user (admin only)
 router.put('/users/:userId', auth, async (req, res) => {
   try {
     // Check if user is admin
@@ -105,7 +105,7 @@ router.put('/users/:userId', auth, async (req, res) => {
     }
 
     const { userId } = req.params;
-    const { name, email, phone, permissions } = req.body;
+    const { name, email, phone, permissions, password } = req.body;
 
     // Find user
     const user = await User.findOne({ userId });
@@ -113,29 +113,42 @@ router.put('/users/:userId', auth, async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
+    // Check if target user is admin (prevent admin from updating other admin passwords)
+    if (password && user.permissions && user.permissions.includes('admin')) {
+      return res.status(403).json({
+        message: 'Cannot update password for admin users'
+      });
+    }
+
     // Check if email is already taken by another user
     if (email && email !== user.email) {
       const existingUser = await User.findOne({ email });
       if (existingUser && existingUser.userId !== userId) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           message: "Email already taken by another user",
           field: "email"
         });
       }
     }
 
-    // Update user
+    // Update user fields
     user.name = name || user.name;
     user.email = email || user.email;
     user.phone = phone || user.phone;
     user.permissions = permissions || user.permissions;
 
+    // Update password if provided (only for non-admin users)
+    if (password && password.trim() !== '') {
+      const salt = await bcrypt.genSalt(10);
+      user.password = await bcrypt.hash(password, salt);
+    }
+
     const updatedUser = await user.save();
-    
+
     // Remove password from response
     const userResponse = updatedUser.toObject();
     delete userResponse.password;
-    
+
     res.json({
       message: "User updated successfully",
       user: {
@@ -150,17 +163,17 @@ router.put('/users/:userId', auth, async (req, res) => {
     });
   } catch (error) {
     console.error("Update error:", error);
-    
+
     if (error.name === 'ValidationError') {
       return res.status(400).json({
         message: "Validation error",
         error: error.message
       });
     }
-    
-    res.status(500).json({ 
-      message: "Update failed", 
-      error: error.message 
+
+    res.status(500).json({
+      message: "Update failed",
+      error: error.message
     });
   }
 });
@@ -182,17 +195,17 @@ router.delete('/users/:userId', auth, async (req, res) => {
 
     // Delete user
     const deletedUser = await User.findOneAndDelete({ userId });
-    
+
     if (!deletedUser) {
       return res.status(404).json({ message: 'User not found' });
     }
-    
+
     res.json({ message: "User deleted successfully" });
   } catch (error) {
     console.error("Delete error:", error);
-    res.status(500).json({ 
-      message: "Delete failed", 
-      error: error.message 
+    res.status(500).json({
+      message: "Delete failed",
+      error: error.message
     });
   }
 });
@@ -226,7 +239,7 @@ router.post('/categories', auth, async (req, res) => {
     const { name } = req.body;
 
     if (!name || !name.trim()) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: "Category name is required",
         field: "name"
       });
@@ -238,7 +251,7 @@ router.post('/categories', auth, async (req, res) => {
     // Check if category already exists
     const existingCategory = await Category.findOne({ name: categoryName });
     if (existingCategory) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: "Category already exists",
         field: "name"
       });
@@ -250,24 +263,24 @@ router.post('/categories', auth, async (req, res) => {
     });
 
     const savedCategory = await category.save();
-    
+
     res.status(201).json({
       message: "Category created successfully",
       category: savedCategory
     });
   } catch (error) {
     console.error("Category creation error:", error);
-    
+
     if (error.name === 'ValidationError') {
       return res.status(400).json({
         message: "Validation error",
         error: error.message
       });
     }
-    
-    res.status(500).json({ 
-      message: "Category creation failed", 
-      error: error.message 
+
+    res.status(500).json({
+      message: "Category creation failed",
+      error: error.message
     });
   }
 });
@@ -283,7 +296,7 @@ router.post('/categories/bulk', auth, async (req, res) => {
     const { categories } = req.body;
 
     if (!categories || !Array.isArray(categories) || categories.length === 0) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: "Categories array is required and must not be empty"
       });
     }
@@ -341,9 +354,9 @@ router.post('/categories/bulk', auth, async (req, res) => {
     });
   } catch (error) {
     console.error("Bulk category creation error:", error);
-    res.status(500).json({ 
-      message: "Bulk category creation failed", 
-      error: error.message 
+    res.status(500).json({
+      message: "Bulk category creation failed",
+      error: error.message
     });
   }
 });
@@ -360,7 +373,7 @@ router.put('/categories/:categoryId', auth, async (req, res) => {
     const { name } = req.body;
 
     if (!name || !name.trim()) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: "Category name is required",
         field: "name"
       });
@@ -376,12 +389,12 @@ router.put('/categories/:categoryId', auth, async (req, res) => {
     }
 
     // Check if new name already exists (excluding current category)
-    const existingCategory = await Category.findOne({ 
+    const existingCategory = await Category.findOne({
       name: categoryName,
       categoryId: { $ne: categoryId }
     });
     if (existingCategory) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: "Category name already exists",
         field: "name"
       });
@@ -390,24 +403,24 @@ router.put('/categories/:categoryId', auth, async (req, res) => {
     // Update category
     category.name = categoryName;
     const updatedCategory = await category.save();
-    
+
     res.json({
       message: "Category updated successfully",
       category: updatedCategory
     });
   } catch (error) {
     console.error("Category update error:", error);
-    
+
     if (error.name === 'ValidationError') {
       return res.status(400).json({
         message: "Validation error",
         error: error.message
       });
     }
-    
-    res.status(500).json({ 
-      message: "Category update failed", 
-      error: error.message 
+
+    res.status(500).json({
+      message: "Category update failed",
+      error: error.message
     });
   }
 });
@@ -424,17 +437,17 @@ router.delete('/categories/:categoryId', auth, async (req, res) => {
 
     // Delete category
     const deletedCategory = await Category.findOneAndDelete({ categoryId });
-    
+
     if (!deletedCategory) {
       return res.status(404).json({ message: 'Category not found' });
     }
-    
+
     res.json({ message: "Category deleted successfully" });
   } catch (error) {
     console.error("Category delete error:", error);
-    res.status(500).json({ 
-      message: "Category delete failed", 
-      error: error.message 
+    res.status(500).json({
+      message: "Category delete failed",
+      error: error.message
     });
   }
 });
