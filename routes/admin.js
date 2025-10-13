@@ -200,7 +200,7 @@ router.delete('/users/:userId', auth, async (req, res) => {
 // Category Management Routes
 
 // Get all categories
-router.get('/categories', auth, async (req, res) => {
+router.get('/categories', async (req, res) => {
   try {
     // Check if user is admin
     // if (!req.user.permissions || !req.user.permissions.includes('admin')) {
