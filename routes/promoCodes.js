@@ -225,7 +225,6 @@ router.delete("/delete-promo/:promoId", async (req, res) => {
     }
 });
 
-// Update the validate-promo endpoint in your backend to return specific messages
 router.get("/validate-promo/:code", async (req, res) => {
     try {
         const { code } = req.params;
@@ -301,6 +300,31 @@ router.get("/validate-promo/:code", async (req, res) => {
         res.status(500).json({
             isValid: false,
             message: "Failed to validate promo code"
+        });
+    }
+});
+
+
+// Add this route to your promoCode routes
+router.get("/get-active-promos", async (req, res) => {
+    try {
+        // Update expired promos before fetching
+        await PromoCode.updateExpiredPromos();
+
+        const activePromos = await PromoCode.find({
+            isActive: true,
+            isExpired: false,
+            startDate: { $lte: new Date() },
+            endDate: { $gte: new Date() }
+        }).sort({ discount: -1 });
+
+        const plainPromos = activePromos.map(promo => promo.toObject());
+        res.status(200).json(plainPromos);
+    } catch (error) {
+        console.error("Error fetching active promo codes:", error);
+        res.status(500).json({
+            message: "Failed to fetch active promo codes",
+            error: error.message
         });
     }
 });
