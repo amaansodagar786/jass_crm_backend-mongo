@@ -5,8 +5,7 @@ const Invoice = require("../models/invoiceModel");
 const GlobalCounter = require("../models/globalCounter");
 const Inventory = require("../models/inventory");
 
-// Create new invoice
-// Create new invoice - FIXED VERSION (No Transactions)
+// In your create-invoice route
 router.post("/create-invoice", async (req, res) => {
   try {
     // Generate Invoice number using atomic operation
@@ -23,10 +22,16 @@ router.post("/create-invoice", async (req, res) => {
 
     const newInvoiceNumber = `INV${new Date().getFullYear()}${String(counter.count).padStart(4, "0")}`;
 
-    // Create invoice with generated number
+    // Create invoice with generated number including promo details
     const invoiceData = {
       ...req.body,
-      invoiceNumber: newInvoiceNumber
+      invoiceNumber: newInvoiceNumber,
+      // Ensure promo details are properly saved
+      appliedPromoCode: req.body.appliedPromoCode ? {
+        ...req.body.appliedPromoCode,
+        appliedAt: new Date()
+      } : null,
+      promoDiscount: req.body.promoDiscount || 0
     };
 
     // Step 1: Create the invoice first
@@ -37,7 +42,6 @@ router.post("/create-invoice", async (req, res) => {
     for (const item of req.body.items) {
       const inventoryItem = await Inventory.findOne({ productId: item.productId });
 
-      // If product not found in inventory, delete the invoice and return error
       if (!inventoryItem) {
         await Invoice.findOneAndDelete({ invoiceNumber: newInvoiceNumber });
         return res.status(404).json({
@@ -46,10 +50,8 @@ router.post("/create-invoice", async (req, res) => {
         });
       }
 
-      // Find the specific batch
       const batch = inventoryItem.batches.find(b => b.batchNumber === item.batchNumber);
 
-      // If batch not found, delete the invoice and return error
       if (!batch) {
         await Invoice.findOneAndDelete({ invoiceNumber: newInvoiceNumber });
         return res.status(404).json({
@@ -58,7 +60,6 @@ router.post("/create-invoice", async (req, res) => {
         });
       }
 
-      // Check if sufficient quantity available
       if (batch.quantity < item.quantity) {
         await Invoice.findOneAndDelete({ invoiceNumber: newInvoiceNumber });
         return res.status(400).json({
@@ -67,14 +68,11 @@ router.post("/create-invoice", async (req, res) => {
         });
       }
 
-      // Deduct the quantity from batch
       batch.quantity -= item.quantity;
       await inventoryItem.save();
-
-      console.log(`Updated inventory: ${item.name} - Batch ${item.batchNumber} - Remaining: ${batch.quantity}`);
     }
 
-    // Step 3: If everything successful, return the created invoice
+    // Step 3: Return success response
     res.status(201).json({
       success: true,
       message: "Invoice created successfully",

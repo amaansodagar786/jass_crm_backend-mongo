@@ -26,13 +26,58 @@ router.post("/create-sale", async (req, res) => {
       req.body.ewayBill.docNo = newInvoiceNumber;
     }
 
+    // Step 1.5: Add appliedAt timestamp to promo code if present
+    if (req.body.appliedPromoCode) {
+      req.body.appliedPromoCode.appliedAt = new Date().toISOString();
+    }
+
+    // Step 1.6: Calculate loyalty coins from frontend data
+    const { baseValue, customer, appliedPromoCode, promoDiscount } = req.body;
+
+    let loyaltyCoinsEarned = 0;
+    if (baseValue && customer && customer.customerId) {
+      // Calculate coins: 1 coin per 100 rupees, rounded down, max 50
+      loyaltyCoinsEarned = Math.floor(baseValue / 100);
+      loyaltyCoinsEarned = Math.min(loyaltyCoinsEarned, 50);
+
+      // Add loyalty coins to the invoice data
+      req.body.loyaltyCoinsEarned = loyaltyCoinsEarned;
+    }
+
     // Step 2: Save the invoice
     const newSale = new Sales(req.body);
     await newSale.save();
 
+    // Step 3: Update customer's loyalty coins in Customer collection
+    if (loyaltyCoinsEarned > 0 && customer && customer.customerId) {
+      try {
+        // Find the customer and update their coins
+        const customerToUpdate = await Customer.findOne({ customerId: customer.customerId });
+        if (customerToUpdate) {
+          customerToUpdate.loyaltyCoins = (customerToUpdate.loyaltyCoins || 0) + loyaltyCoinsEarned;
+          await customerToUpdate.save();
+          console.log(`Updated customer ${customer.customerId} with ${loyaltyCoinsEarned} loyalty coins. Total: ${customerToUpdate.loyaltyCoins}`);
+        }
+      } catch (customerError) {
+        console.error("Failed to update customer loyalty coins:", customerError);
+        // Don't fail the invoice creation if coin update fails
+      }
+    }
+
+    // Step 4: Prepare success message with promo details if applicable
+    let successMessage = "Invoice created successfully!";
+
+    if (loyaltyCoinsEarned > 0) {
+      successMessage += ` Customer earned ${loyaltyCoinsEarned} loyalty coins.`;
+    }
+
+    if (appliedPromoCode) {
+      successMessage += ` Promo code "${appliedPromoCode.code}" applied with ${appliedPromoCode.discount}% discount.`;
+    }
+
     res.status(201).json({
       success: true,
-      message: "Invoice created successfully",
+      message: successMessage,
       data: newSale
     });
 

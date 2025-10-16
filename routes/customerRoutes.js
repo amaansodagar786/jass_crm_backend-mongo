@@ -243,4 +243,44 @@ router.post("/bulk-create-customers", async (req, res) => {
   }
 });
 
+
+// Update customer loyalty coins
+router.put("/update-loyalty-coins/:customerId", async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const { coinsEarned } = req.body;
+
+    const customer = await Customer.findOne({ customerId });
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found"
+      });
+    }
+
+    // Update loyalty coins by adding new coins
+    customer.loyaltyCoins = (customer.loyaltyCoins || 0) + coinsEarned;
+    await customer.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Loyalty coins updated successfully",
+      data: {
+        customerId: customer.customerId,
+        loyaltyCoins: customer.loyaltyCoins,
+        coinsEarned: coinsEarned
+      }
+    });
+
+  } catch (error) {
+    console.error("Error updating loyalty coins:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to update loyalty coins",
+      error: error.message
+    });
+  }
+});
+
 module.exports = router;

@@ -35,6 +35,8 @@ const adminRoutes = require('./routes/admin');
 const customerRoutes = require("./routes/customerRoutes");
 const authRoutes = require("./routes/authRoutes");
 const ReportRoutes = require("./routes/reports");
+const promoCodesRoutes = require('./routes/promoCodes');
+
 
 
 
@@ -45,6 +47,9 @@ app.use("/invoices", InvoiceRoutes);
 app.use('/admin', adminRoutes);
 app.use('/inventory', inventoryRoutes);
 app.use('/report', ReportRoutes);
+
+app.use('/promoCodes', promoCodesRoutes);
+
 
 // app.use('/vendors', vendorRoutes);
 // app.use('/items', itemRoutes);
@@ -65,7 +70,7 @@ app.get('/', (req, res) => {
 });
 
 // Server
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3037;
 app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
 });

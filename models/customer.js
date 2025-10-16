@@ -17,6 +17,12 @@ const customerSchema = new mongoose.Schema({
   contactNumber: {
     type: String,
     required: [true, 'Contact number is required']
+  },
+
+  loyaltyCoins: {
+    type: Number,
+    default: 0,
+    min: 0
   }
 }, {
   timestamps: true // This will automatically add createdAt and updatedAt fields

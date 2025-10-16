@@ -82,6 +82,30 @@ const salesSchema = new dynamoose.Schema(
     inspectionPercent: { type: Number, default: 0 },
     tcsPercent: { type: Number, default: 0 },
 
+    loyaltyCoinsEarned: {
+      type: Number,
+      default: 0,
+      min: 0
+    },
+
+    // 🔹 NEW: Promo Code Details
+    appliedPromoCode: {
+      type: Object,
+      schema: {
+        promoId: String,
+        code: String,
+        discount: Number,
+        description: String,
+        appliedAt: String
+      }
+    },
+    
+    promoDiscount: {
+      type: Number,
+      default: 0,
+      min: 0
+    },
+
     subtotal: Number,
     taxSlab: Number,
     cgst: Number,
@@ -165,7 +189,6 @@ const salesSchema = new dynamoose.Schema(
   },
   { timestamps: true }
 );
-
 
 const Sales = dynamoose.model("Sales", salesSchema);
 module.exports = Sales;
