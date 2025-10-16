@@ -66,7 +66,7 @@ app.use('/promoCodes', promoCodesRoutes);
 
 // Basic Route
 app.get('/', (req, res) => {
-  res.send('Hello World from Jass Perfumes Inventory Backend !');
+  res.send('Hello World from Jass Inventory Backend !');
 });
 
 // Server
