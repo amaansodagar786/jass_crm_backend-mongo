@@ -244,11 +244,11 @@ router.post("/bulk-create-customers", async (req, res) => {
 });
 
 
-// Update customer loyalty coins
+// Update customer loyalty coins - CORRECTED VERSION
 router.put("/update-loyalty-coins/:customerId", async (req, res) => {
   try {
     const { customerId } = req.params;
-    const { coinsEarned } = req.body;
+    const { coinsEarned, coinsUsed } = req.body;
 
     const customer = await Customer.findOne({ customerId });
 
@@ -259,8 +259,20 @@ router.put("/update-loyalty-coins/:customerId", async (req, res) => {
       });
     }
 
-    // Update loyalty coins by adding new coins
-    customer.loyaltyCoins = (customer.loyaltyCoins || 0) + coinsEarned;
+    let currentCoins = customer.loyaltyCoins || 0;
+    const previousBalance = currentCoins;
+
+    // Step 1: First DEDUCT used coins (if any)
+    if (coinsUsed && coinsUsed > 0) {
+      currentCoins = Math.max(0, currentCoins - coinsUsed);
+    }
+
+    // Step 2: Then ADD earned coins (if any)
+    if (coinsEarned && coinsEarned > 0) {
+      currentCoins = currentCoins + coinsEarned;
+    }
+
+    customer.loyaltyCoins = currentCoins;
     await customer.save();
 
     res.status(200).json({
@@ -269,7 +281,9 @@ router.put("/update-loyalty-coins/:customerId", async (req, res) => {
       data: {
         customerId: customer.customerId,
         loyaltyCoins: customer.loyaltyCoins,
-        coinsEarned: coinsEarned
+        coinsEarned: coinsEarned || 0,
+        coinsUsed: coinsUsed || 0,
+        previousBalance: previousBalance
       }
     });
 

@@ -48,14 +48,16 @@ const invoiceSchema = new mongoose.Schema(
     subtotal: Number,
     baseValue: Number,
     discount: Number,
-    promoDiscount: Number, // ✅ Add promo discount amount
-    appliedPromoCode: {    // ✅ Add promo code details
+    promoDiscount: Number, 
+    appliedPromoCode: {    
       promoId: String,
       code: String,
       discount: Number,
       description: String,
       appliedAt: Date
     },
+    loyaltyDiscount: Number, 
+    loyaltyCoinsUsed: Number,
     tax: Number,
     cgst: Number,
     sgst: Number,

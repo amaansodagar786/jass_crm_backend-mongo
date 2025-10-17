@@ -16,6 +16,11 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cors());
 app.use(express.json());
 
+
+const cron = require("node-cron");
+
+const Customer = require("./models/customer");
+
 // API routes (same as before)
 // const vendorRoutes = require('./routes/vendorRoutes'); 
 // const itemRoutes = require('./routes/itemRoutes'); 
@@ -51,17 +56,18 @@ app.use('/report', ReportRoutes);
 app.use('/promoCodes', promoCodesRoutes);
 
 
-// app.use('/vendors', vendorRoutes);
-// app.use('/items', itemRoutes);
-// app.use('/po', purchaseOrderRoutes);
-// app.use('/grn', grnRoutes);
-// app.use('/bom', bomRoute);
-// app.use('/sales', salesRoutes);
+cron.schedule("0 0 1 1 *", async () => {
+  try {
+    await Customer.updateMany({}, { $set: { loyaltyCoins: 0 } });
+    console.log("✅ Yearly reset: Loyalty coins reset for all customers (1 Jan)");
+  } catch (error) {
+    console.error("❌ Error resetting loyalty coins:", error);
+  }
+});
 
-// app.use('/workorder', workOrderRoutes);
-// app.use('/s3', s3Routes);
 
-// app.use('/defective', DefectiveRoutes);
+
+
 
 
 // Basic Route

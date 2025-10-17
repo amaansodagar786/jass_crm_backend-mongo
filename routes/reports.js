@@ -70,7 +70,12 @@ router.get("/sales-summary", async (req, res) => {
             sum + invoice.items.reduce((itemSum, item) => itemSum + item.quantity, 0), 0
         );
         const totalTax = invoices.reduce((sum, invoice) => sum + invoice.tax, 0);
-        const totalDiscount = invoices.reduce((sum, invoice) => sum + invoice.discount, 0);
+        const totalDiscount = invoices.reduce((sum, invoice) =>
+            sum +
+            (invoice.discount || 0) +         // Existing normal discount
+            (invoice.promoDiscount || 0) +    // ✅ New promo discount
+            (invoice.loyaltyDiscount || 0),   // ✅ New loyalty discount
+            0);
         const invoiceCount = invoices.length;
         const averageOrderValue = invoiceCount > 0 ? totalSales / invoiceCount : 0;
 
