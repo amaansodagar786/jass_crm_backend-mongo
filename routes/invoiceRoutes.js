@@ -8,9 +8,245 @@ const DeletedInvoice = require("../models/deletedInvoiceModel");
 
 
 // In your create-invoice route
+// router.post("/create-invoice", async (req, res) => {
+//   const startTime = Date.now();
+//   const requestId = `INV_REQ_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+//   try {
+//     console.log(`🔄 [${requestId}] Starting invoice creation process`);
+//     console.log(`📥 [${requestId}] Request body summary:`, {
+//       customer: req.body.customer?.name || 'Unknown',
+//       itemsCount: req.body.items?.length || 0,
+//       totalAmount: req.body.total,
+//       paymentType: req.body.paymentType,
+//       hasPromo: !!req.body.appliedPromoCode
+//     });
+
+//     // Generate Invoice number using atomic operation
+//     console.log(`🔢 [${requestId}] Generating invoice number...`);
+//     const counterId = "invoices";
+//     let counter = await GlobalCounter.findOneAndUpdate(
+//       { id: counterId },
+//       { $inc: { count: 1 } },
+//       {
+//         new: true,
+//         upsert: true,
+//         setDefaultsOnInsert: true
+//       }
+//     );
+
+//     const newInvoiceNumber = `INV${new Date().getFullYear()}${String(counter.count).padStart(4, "0")}`;
+//     console.log(`✅ [${requestId}] Invoice number generated: ${newInvoiceNumber}`);
+//     console.log(`📊 [${requestId}] Counter updated - next count: ${counter.count + 1}`);
+
+//     // Create invoice with generated number including promo details
+//     const invoiceData = {
+//       ...req.body,
+//       invoiceNumber: newInvoiceNumber,
+//       // Ensure promo details are properly saved
+//       appliedPromoCode: req.body.appliedPromoCode ? {
+//         ...req.body.appliedPromoCode,
+//         appliedAt: new Date()
+//       } : null,
+//       promoDiscount: req.body.promoDiscount || 0
+//     };
+
+//     console.log(`📄 [${requestId}] Invoice data prepared:`, {
+//       invoiceNumber: newInvoiceNumber,
+//       customer: invoiceData.customer?.name,
+//       itemsCount: invoiceData.items?.length,
+//       subtotal: invoiceData.subtotal,
+//       discount: invoiceData.discount,
+//       promoDiscount: invoiceData.promoDiscount,
+//       total: invoiceData.total,
+//       paymentType: invoiceData.paymentType
+//     });
+
+//     // Step 1: Create the invoice first
+//     console.log(`💾 [${requestId}] Saving invoice to database...`);
+//     const newInvoice = new Invoice(invoiceData);
+//     await newInvoice.save();
+//     console.log(`✅ [${requestId}] Invoice saved successfully to database`);
+
+//     // Step 2: Update inventory quantities for each item
+//     console.log(`📦 [${requestId}] Starting inventory update for ${invoiceData.items?.length} items`);
+
+//     for (const [index, item] of req.body.items.entries()) {
+//       console.log(`🔍 [${requestId}] Processing item ${index + 1}/${req.body.items.length}:`, {
+//         productId: item.productId,
+//         name: item.name,
+//         batchNumber: item.batchNumber,
+//         quantity: item.quantity,
+//         price: item.price
+//       });
+
+//       const inventoryItem = await Inventory.findOne({ productId: item.productId });
+
+//       if (!inventoryItem) {
+//         console.log(`❌ [${requestId}] Product not found in inventory:`, {
+//           productId: item.productId,
+//           productName: item.name,
+//           batchNumber: item.batchNumber
+//         });
+
+//         // Rollback: Delete the created invoice
+//         console.log(`🔄 [${requestId}] Rolling back - deleting invoice ${newInvoiceNumber}`);
+//         await Invoice.findOneAndDelete({ invoiceNumber: newInvoiceNumber });
+
+//         console.log(`❌ [${requestId}] Invoice creation failed - Product not found`);
+//         return res.status(404).json({
+//           success: false,
+//           message: `Product "${item.name}" not found in inventory`,
+//           requestId: requestId
+//         });
+//       }
+
+//       console.log(`📋 [${requestId}] Inventory item found:`, {
+//         productName: inventoryItem.productName,
+//         totalQuantity: inventoryItem.totalQuantity,
+//         batchesCount: inventoryItem.batches.length
+//       });
+
+//       const batch = inventoryItem.batches.find(b => b.batchNumber === item.batchNumber);
+
+//       if (!batch) {
+//         console.log(`❌ [${requestId}] Batch not found:`, {
+//           productId: item.productId,
+//           productName: item.name,
+//           requestedBatch: item.batchNumber,
+//           availableBatches: inventoryItem.batches.map(b => b.batchNumber)
+//         });
+
+//         // Rollback: Delete the created invoice
+//         console.log(`🔄 [${requestId}] Rolling back - deleting invoice ${newInvoiceNumber}`);
+//         await Invoice.findOneAndDelete({ invoiceNumber: newInvoiceNumber });
+
+//         console.log(`❌ [${requestId}] Invoice creation failed - Batch not found`);
+//         return res.status(404).json({
+//           success: false,
+//           message: `Batch "${item.batchNumber}" not found for product "${item.name}"`,
+//           requestId: requestId,
+//           availableBatches: inventoryItem.batches.map(b => b.batchNumber)
+//         });
+//       }
+
+//       console.log(`📊 [${requestId}] Batch details:`, {
+//         batchNumber: batch.batchNumber,
+//         currentQuantity: batch.quantity,
+//         requestedQuantity: item.quantity,
+//         expiryDate: batch.expiryDate
+//       });
+
+//       if (batch.quantity < item.quantity) {
+//         console.log(`❌ [${requestId}] Insufficient quantity:`, {
+//           productName: item.name,
+//           batchNumber: item.batchNumber,
+//           available: batch.quantity,
+//           requested: item.quantity,
+//           shortage: item.quantity - batch.quantity
+//         });
+
+//         // Rollback: Delete the created invoice
+//         console.log(`🔄 [${requestId}] Rolling back - deleting invoice ${newInvoiceNumber}`);
+//         await Invoice.findOneAndDelete({ invoiceNumber: newInvoiceNumber });
+
+//         console.log(`❌ [${requestId}] Invoice creation failed - Insufficient quantity`);
+//         return res.status(400).json({
+//           success: false,
+//           message: `Insufficient quantity for "${item.name}" (Batch: ${item.batchNumber}). Available: ${batch.quantity}, Requested: ${item.quantity}`,
+//           requestId: requestId,
+//           available: batch.quantity,
+//           requested: item.quantity
+//         });
+//       }
+
+//       // Update inventory quantity
+//       const oldQuantity = batch.quantity;
+//       batch.quantity -= item.quantity;
+//       const newQuantity = batch.quantity;
+
+//       console.log(`🔄 [${requestId}] Updating inventory:`, {
+//         productName: item.name,
+//         batchNumber: item.batchNumber,
+//         quantityChange: -item.quantity,
+//         oldQuantity: oldQuantity,
+//         newQuantity: newQuantity
+//       });
+
+//       await inventoryItem.save();
+//       console.log(`✅ [${requestId}] Inventory updated successfully for ${item.name}`);
+//     }
+
+//     // Calculate processing time
+//     const processingTime = Date.now() - startTime;
+
+//     console.log(`🎉 [${requestId}] Invoice creation completed successfully!`, {
+//       invoiceNumber: newInvoiceNumber,
+//       totalItems: newInvoice.items.length,
+//       customer: newInvoice.customer?.name,
+//       totalAmount: newInvoice.total,
+//       processingTime: `${processingTime}ms`,
+//       timestamp: new Date().toISOString()
+//     });
+
+//     console.log(`📦 [${requestId}] Inventory updates summary:`, {
+//       itemsProcessed: newInvoice.items.length,
+//       totalQuantityReduced: newInvoice.items.reduce((sum, item) => sum + item.quantity, 0),
+//       customer: newInvoice.customer?.name
+//     });
+
+//     // Step 3: Return success response
+//     res.status(201).json({
+//       success: true,
+//       message: "Invoice created successfully",
+//       data: newInvoice.toObject(),
+//       requestId: requestId,
+//       processingTime: `${processingTime}ms`
+//     });
+
+//   } catch (error) {
+//     const processingTime = Date.now() - startTime;
+
+//     console.error(`💥 [${requestId}] Error creating invoice:`, {
+//       error: error.message,
+//       stack: error.stack,
+//       processingTime: `${processingTime}ms`,
+//       timestamp: new Date().toISOString()
+//     });
+
+//     console.error(`📋 [${requestId}] Error context:`, {
+//       invoiceNumber: newInvoiceNumber || 'NOT_GENERATED',
+//       itemsCount: req.body.items?.length,
+//       customer: req.body.customer?.name
+//     });
+
+//     // If invoice was created but something else failed, attempt rollback
+//     if (newInvoiceNumber) {
+//       try {
+//         console.log(`🔄 [${requestId}] Attempting to rollback - deleting invoice ${newInvoiceNumber}`);
+//         await Invoice.findOneAndDelete({ invoiceNumber: newInvoiceNumber });
+//         console.log(`✅ [${requestId}] Rollback completed`);
+//       } catch (rollbackError) {
+//         console.error(`❌ [${requestId}] Rollback failed:`, rollbackError.message);
+//       }
+//     }
+
+//     res.status(500).json({
+//       success: false,
+//       message: "Failed to create invoice",
+//       error: error.message,
+//       requestId: requestId,
+//       processingTime: `${processingTime}ms`
+//     });
+//   }
+// });
+
+
+// In your create-invoice route - FIXED VERSION
 router.post("/create-invoice", async (req, res) => {
   const startTime = Date.now();
   const requestId = `INV_REQ_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  let newInvoiceNumber = null;
 
   try {
     console.log(`🔄 [${requestId}] Starting invoice creation process`);
@@ -22,7 +258,132 @@ router.post("/create-invoice", async (req, res) => {
       hasPromo: !!req.body.appliedPromoCode
     });
 
-    // Generate Invoice number using atomic operation
+    // 🛡️ STEP 1: Validate request data FIRST
+    if (!req.body.items || req.body.items.length === 0) {
+      console.log(`❌ [${requestId}] No items in request`);
+      return res.status(400).json({
+        success: false,
+        message: "Invoice must contain at least one item",
+        requestId: requestId
+      });
+    }
+
+    if (!req.body.customer || !req.body.customer.mobile || !req.body.customer.name) {
+      console.log(`❌ [${requestId}] Invalid customer data`);
+      return res.status(400).json({
+        success: false,
+        message: "Customer name and mobile are required",
+        requestId: requestId
+      });
+    }
+
+    // 🛡️ STEP 2: Validate ALL inventory items BEFORE any creation
+    console.log(`🔍 [${requestId}] Validating inventory for ${req.body.items.length} items...`);
+    
+    const inventoryValidation = [];
+    
+    for (const [index, item] of req.body.items.entries()) {
+      console.log(`🔍 [${requestId}] Validating item ${index + 1}/${req.body.items.length}:`, {
+        productId: item.productId,
+        name: item.name,
+        batchNumber: item.batchNumber,
+        quantity: item.quantity
+      });
+
+      // Validate item data
+      if (!item.productId || !item.batchNumber || !item.quantity || item.quantity < 1) {
+        inventoryValidation.push({
+          productId: item.productId,
+          productName: item.name,
+          error: "Invalid item data - productId, batchNumber and quantity (min 1) are required"
+        });
+        continue;
+      }
+
+      const inventoryItem = await Inventory.findOne({ productId: item.productId });
+
+      if (!inventoryItem) {
+        inventoryValidation.push({
+          productId: item.productId,
+          productName: item.name,
+          batchNumber: item.batchNumber,
+          error: "Product not found in inventory"
+        });
+        continue;
+      }
+
+      const batch = inventoryItem.batches.find(b => b.batchNumber === item.batchNumber);
+
+      if (!batch) {
+        inventoryValidation.push({
+          productId: item.productId,
+          productName: item.name,
+          batchNumber: item.batchNumber,
+          error: "Batch not found for this product",
+          availableBatches: inventoryItem.batches.map(b => b.batchNumber)
+        });
+        continue;
+      }
+
+      // Check expiry
+      const isExpired = new Date(batch.expiryDate) < new Date();
+      if (isExpired) {
+        inventoryValidation.push({
+          productId: item.productId,
+          productName: item.name,
+          batchNumber: item.batchNumber,
+          error: "Batch has expired",
+          expiryDate: batch.expiryDate
+        });
+        continue;
+      }
+
+      // Check quantity
+      if (batch.quantity < item.quantity) {
+        inventoryValidation.push({
+          productId: item.productId,
+          productName: item.name,
+          batchNumber: item.batchNumber,
+          error: "Insufficient quantity",
+          available: batch.quantity,
+          requested: item.quantity,
+          shortage: item.quantity - batch.quantity
+        });
+        continue;
+      }
+
+      // Store valid batch for later update
+      inventoryValidation.push({
+        productId: item.productId,
+        productName: item.name,
+        batchNumber: item.batchNumber,
+        inventoryItem: inventoryItem,
+        batch: batch,
+        quantity: item.quantity,
+        valid: true
+      });
+    }
+
+    // 🛡️ STEP 3: Check if any validation failed
+    const failedValidations = inventoryValidation.filter(item => !item.valid);
+    if (failedValidations.length > 0) {
+      console.log(`❌ [${requestId}] Inventory validation failed:`, failedValidations);
+      return res.status(400).json({
+        success: false,
+        message: "Inventory validation failed",
+        requestId: requestId,
+        validationErrors: failedValidations,
+        details: {
+          totalErrors: failedValidations.length,
+          firstError: failedValidations[0]?.error,
+          exampleItem: failedValidations[0]?.productName
+        }
+      });
+    }
+
+    console.log(`✅ [${requestId}] All inventory validation passed for ${inventoryValidation.length} items`);
+
+    // 🛡️ STEP 4: Generate invoice number ONLY after validation
     console.log(`🔢 [${requestId}] Generating invoice number...`);
     const counterId = "invoices";
     let counter = await GlobalCounter.findOneAndUpdate(
@@ -35,20 +396,20 @@ router.post("/create-invoice", async (req, res) => {
       }
     );
 
-    const newInvoiceNumber = `INV${new Date().getFullYear()}${String(counter.count).padStart(4, "0")}`;
+    newInvoiceNumber = `INV${new Date().getFullYear()}${String(counter.count).padStart(4, "0")}`;
     console.log(`✅ [${requestId}] Invoice number generated: ${newInvoiceNumber}`);
-    console.log(`📊 [${requestId}] Counter updated - next count: ${counter.count + 1}`);
 
-    // Create invoice with generated number including promo details
+    // 🛡️ STEP 5: Prepare invoice data
     const invoiceData = {
       ...req.body,
       invoiceNumber: newInvoiceNumber,
-      // Ensure promo details are properly saved
       appliedPromoCode: req.body.appliedPromoCode ? {
         ...req.body.appliedPromoCode,
         appliedAt: new Date()
       } : null,
-      promoDiscount: req.body.promoDiscount || 0
+      promoDiscount: req.body.promoDiscount || 0,
+      createdAt: new Date(),
+      updatedAt: new Date()
     };
 
     console.log(`📄 [${requestId}] Invoice data prepared:`, {
@@ -62,147 +423,92 @@ router.post("/create-invoice", async (req, res) => {
       paymentType: invoiceData.paymentType
     });
 
-    // Step 1: Create the invoice first
-    console.log(`💾 [${requestId}] Saving invoice to database...`);
-    const newInvoice = new Invoice(invoiceData);
-    await newInvoice.save();
-    console.log(`✅ [${requestId}] Invoice saved successfully to database`);
+    // 🛡️ STEP 6: Start database transaction (if using MongoDB transactions)
+    // For simplicity, we'll handle rollback manually
+    
+    let invoiceCreated = false;
+    let inventoryUpdated = false;
 
-    // Step 2: Update inventory quantities for each item
-    console.log(`📦 [${requestId}] Starting inventory update for ${invoiceData.items?.length} items`);
+    try {
+      // 🛡️ STEP 7: Create the invoice
+      console.log(`💾 [${requestId}] Saving invoice to database...`);
+      const newInvoice = new Invoice(invoiceData);
+      await newInvoice.save();
+      invoiceCreated = true;
+      console.log(`✅ [${requestId}] Invoice saved successfully to database`);
 
-    for (const [index, item] of req.body.items.entries()) {
-      console.log(`🔍 [${requestId}] Processing item ${index + 1}/${req.body.items.length}:`, {
-        productId: item.productId,
-        name: item.name,
-        batchNumber: item.batchNumber,
-        quantity: item.quantity,
-        price: item.price
-      });
+      // 🛡️ STEP 8: Update inventory quantities
+      console.log(`📦 [${requestId}] Updating inventory for ${inventoryValidation.length} items...`);
+      
+      const inventoryUpdates = [];
+      
+      for (const validation of inventoryValidation) {
+        if (validation.valid) {
+          const oldQuantity = validation.batch.quantity;
+          validation.batch.quantity -= validation.quantity;
+          const newQuantity = validation.batch.quantity;
 
-      const inventoryItem = await Inventory.findOne({ productId: item.productId });
+          console.log(`🔄 [${requestId}] Updating inventory:`, {
+            productName: validation.productName,
+            batchNumber: validation.batchNumber,
+            quantityChange: -validation.quantity,
+            oldQuantity: oldQuantity,
+            newQuantity: newQuantity
+          });
 
-      if (!inventoryItem) {
-        console.log(`❌ [${requestId}] Product not found in inventory:`, {
-          productId: item.productId,
-          productName: item.name,
-          batchNumber: item.batchNumber
-        });
-
-        // Rollback: Delete the created invoice
-        console.log(`🔄 [${requestId}] Rolling back - deleting invoice ${newInvoiceNumber}`);
-        await Invoice.findOneAndDelete({ invoiceNumber: newInvoiceNumber });
-
-        console.log(`❌ [${requestId}] Invoice creation failed - Product not found`);
-        return res.status(404).json({
-          success: false,
-          message: `Product "${item.name}" not found in inventory`,
-          requestId: requestId
-        });
+          inventoryUpdates.push(validation.inventoryItem.save());
+        }
       }
 
-      console.log(`📋 [${requestId}] Inventory item found:`, {
-        productName: inventoryItem.productName,
-        totalQuantity: inventoryItem.totalQuantity,
-        batchesCount: inventoryItem.batches.length
+      // Wait for all inventory updates to complete
+      await Promise.all(inventoryUpdates);
+      inventoryUpdated = true;
+      console.log(`✅ [${requestId}] All inventory updates completed successfully`);
+
+      // 🛡️ STEP 9: Calculate processing time and return success
+      const processingTime = Date.now() - startTime;
+
+      console.log(`🎉 [${requestId}] Invoice creation completed successfully!`, {
+        invoiceNumber: newInvoiceNumber,
+        totalItems: newInvoice.items.length,
+        customer: newInvoice.customer?.name,
+        totalAmount: newInvoice.total,
+        processingTime: `${processingTime}ms`,
+        timestamp: new Date().toISOString()
       });
 
-      const batch = inventoryItem.batches.find(b => b.batchNumber === item.batchNumber);
+      console.log(`📦 [${requestId}] Inventory updates summary:`, {
+        itemsProcessed: newInvoice.items.length,
+        totalQuantityReduced: newInvoice.items.reduce((sum, item) => sum + item.quantity, 0),
+        customer: newInvoice.customer?.name
+      });
 
-      if (!batch) {
-        console.log(`❌ [${requestId}] Batch not found:`, {
-          productId: item.productId,
-          productName: item.name,
-          requestedBatch: item.batchNumber,
-          availableBatches: inventoryItem.batches.map(b => b.batchNumber)
-        });
+      res.status(201).json({
+        success: true,
+        message: "Invoice created successfully",
+        data: newInvoice.toObject(),
+        requestId: requestId,
+        processingTime: `${processingTime}ms`
+      });
 
-        // Rollback: Delete the created invoice
+    } catch (dbError) {
+      // 🛡️ STEP 10: Handle database errors with proper rollback
+      console.error(`💥 [${requestId}] Database error during invoice creation:`, dbError.message);
+      
+      // Rollback logic
+      if (invoiceCreated && !inventoryUpdated) {
         console.log(`🔄 [${requestId}] Rolling back - deleting invoice ${newInvoiceNumber}`);
-        await Invoice.findOneAndDelete({ invoiceNumber: newInvoiceNumber });
-
-        console.log(`❌ [${requestId}] Invoice creation failed - Batch not found`);
-        return res.status(404).json({
-          success: false,
-          message: `Batch "${item.batchNumber}" not found for product "${item.name}"`,
-          requestId: requestId,
-          availableBatches: inventoryItem.batches.map(b => b.batchNumber)
-        });
+        try {
+          await Invoice.findOneAndDelete({ invoiceNumber: newInvoiceNumber });
+          console.log(`✅ [${requestId}] Invoice rollback completed`);
+        } catch (rollbackError) {
+          console.error(`❌ [${requestId}] Invoice rollback failed:`, rollbackError.message);
+        }
       }
-
-      console.log(`📊 [${requestId}] Batch details:`, {
-        batchNumber: batch.batchNumber,
-        currentQuantity: batch.quantity,
-        requestedQuantity: item.quantity,
-        expiryDate: batch.expiryDate
-      });
-
-      if (batch.quantity < item.quantity) {
-        console.log(`❌ [${requestId}] Insufficient quantity:`, {
-          productName: item.name,
-          batchNumber: item.batchNumber,
-          available: batch.quantity,
-          requested: item.quantity,
-          shortage: item.quantity - batch.quantity
-        });
-
-        // Rollback: Delete the created invoice
-        console.log(`🔄 [${requestId}] Rolling back - deleting invoice ${newInvoiceNumber}`);
-        await Invoice.findOneAndDelete({ invoiceNumber: newInvoiceNumber });
-
-        console.log(`❌ [${requestId}] Invoice creation failed - Insufficient quantity`);
-        return res.status(400).json({
-          success: false,
-          message: `Insufficient quantity for "${item.name}" (Batch: ${item.batchNumber}). Available: ${batch.quantity}, Requested: ${item.quantity}`,
-          requestId: requestId,
-          available: batch.quantity,
-          requested: item.quantity
-        });
-      }
-
-      // Update inventory quantity
-      const oldQuantity = batch.quantity;
-      batch.quantity -= item.quantity;
-      const newQuantity = batch.quantity;
-
-      console.log(`🔄 [${requestId}] Updating inventory:`, {
-        productName: item.name,
-        batchNumber: item.batchNumber,
-        quantityChange: -item.quantity,
-        oldQuantity: oldQuantity,
-        newQuantity: newQuantity
-      });
-
-      await inventoryItem.save();
-      console.log(`✅ [${requestId}] Inventory updated successfully for ${item.name}`);
+      
+      // Re-throw to be caught by outer catch block
+      throw dbError;
     }
-
-    // Calculate processing time
-    const processingTime = Date.now() - startTime;
-
-    console.log(`🎉 [${requestId}] Invoice creation completed successfully!`, {
-      invoiceNumber: newInvoiceNumber,
-      totalItems: newInvoice.items.length,
-      customer: newInvoice.customer?.name,
-      totalAmount: newInvoice.total,
-      processingTime: `${processingTime}ms`,
-      timestamp: new Date().toISOString()
-    });
-
-    console.log(`📦 [${requestId}] Inventory updates summary:`, {
-      itemsProcessed: newInvoice.items.length,
-      totalQuantityReduced: newInvoice.items.reduce((sum, item) => sum + item.quantity, 0),
-      customer: newInvoice.customer?.name
-    });
-
-    // Step 3: Return success response
-    res.status(201).json({
-      success: true,
-      message: "Invoice created successfully",
-      data: newInvoice.toObject(),
-      requestId: requestId,
-      processingTime: `${processingTime}ms`
-    });
 
   } catch (error) {
     const processingTime = Date.now() - startTime;
@@ -220,17 +526,6 @@ router.post("/create-invoice", async (req, res) => {
       customer: req.body.customer?.name
     });
 
-    // If invoice was created but something else failed, attempt rollback
-    if (newInvoiceNumber) {
-      try {
-        console.log(`🔄 [${requestId}] Attempting to rollback - deleting invoice ${newInvoiceNumber}`);
-        await Invoice.findOneAndDelete({ invoiceNumber: newInvoiceNumber });
-        console.log(`✅ [${requestId}] Rollback completed`);
-      } catch (rollbackError) {
-        console.error(`❌ [${requestId}] Rollback failed:`, rollbackError.message);
-      }
-    }
-
     res.status(500).json({
       success: false,
       message: "Failed to create invoice",
@@ -240,7 +535,6 @@ router.post("/create-invoice", async (req, res) => {
     });
   }
 });
-
 
 // Get all invoices
 router.get("/get-invoices", async (req, res) => {
