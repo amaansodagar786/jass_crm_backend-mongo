@@ -17,10 +17,9 @@ const createInventoryEntry = async (product) => {
     return inventoryEntry;
 };
 
-// Create Product (Updated with Inventory)
 router.post("/create-product", async (req, res) => {
     try {
-        const { productName, barcode } = req.body;
+        const { productName, barcode, userDetails } = req.body;
 
         // Check for existing product name
         const existingByName = await Product.findOne({ productName });
@@ -43,9 +42,28 @@ router.post("/create-product", async (req, res) => {
         // Create inventory entry for the new product
         await createInventoryEntry(savedProduct);
 
+        // ✅ ADD USER LOGGING
+        console.log('📝 PRODUCT CREATED:', {
+            productId: savedProduct.productId,
+            productName: savedProduct.productName,
+            category: savedProduct.category,
+            price: savedProduct.price,
+            taxSlab: savedProduct.taxSlab,
+            user: userDetails ? `${userDetails.name} (${userDetails.email})` : 'Unknown User',
+            timestamp: new Date().toISOString()
+        });
+
         res.status(201).json(savedProduct.toObject());
     } catch (error) {
         console.error("Error saving product:", error);
+
+        // ✅ ADD ERROR LOGGING
+        console.error('❌ PRODUCT CREATION FAILED:', {
+            productName: req.body.productName,
+            user: req.body.userDetails ? `${req.body.userDetails.name}` : 'Unknown User',
+            error: error.message,
+            timestamp: new Date().toISOString()
+        });
 
         if (error.name === 'ValidationError') {
             return res.status(400).json({
@@ -103,7 +121,7 @@ router.post("/bulk-upload-products", async (req, res) => {
                     continue;
                 }
 
-                
+
 
                 // Normalize product data
                 const cleanedData = {
@@ -182,11 +200,10 @@ router.get("/get-products", async (req, res) => {
 });
 
 // Update Product
-// Update Product
 router.put("/update-product/:productId", async (req, res) => {
     try {
         const { productId } = req.params;
-        const { _id, createdAt, updatedAt, ...updateData } = req.body;
+        const { _id, createdAt, updatedAt, userDetails, ...updateData } = req.body;
 
         if (updateData.category) {
             updateData.category = updateData.category.toLowerCase();
@@ -218,6 +235,9 @@ router.put("/update-product/:productId", async (req, res) => {
             }
         }
 
+        // Get the product before update for logging
+        const productBeforeUpdate = await Product.findOne({ productId: productId });
+
         // Update the product
         const updatedProduct = await Product.findOneAndUpdate(
             { productId: productId },
@@ -240,9 +260,31 @@ router.put("/update-product/:productId", async (req, res) => {
             }
         );
 
+        // ✅ ADD USER LOGGING
+        console.log('📝 PRODUCT UPDATED:', {
+            productId: updatedProduct.productId,
+            productName: updatedProduct.productName,
+            category: updatedProduct.category,
+            price: updatedProduct.price,
+            taxSlab: updatedProduct.taxSlab,
+            user: userDetails ? `${userDetails.name} (${userDetails.email})` : 'Unknown User',
+            changes: Object.keys(updateData),
+            oldPrice: productBeforeUpdate?.price,
+            newPrice: updatedProduct.price,
+            timestamp: new Date().toISOString()
+        });
+
         res.status(200).json(updatedProduct.toObject());
     } catch (error) {
         console.error("Error updating product:", error);
+
+        // ✅ ADD ERROR LOGGING
+        console.error('❌ PRODUCT UPDATE FAILED:', {
+            productId: req.params.productId,
+            user: req.body.userDetails ? `${req.body.userDetails.name}` : 'Unknown User',
+            error: error.message,
+            timestamp: new Date().toISOString()
+        });
 
         if (error.name === 'ValidationError') {
             return res.status(400).json({
@@ -259,28 +301,53 @@ router.put("/update-product/:productId", async (req, res) => {
 });
 
 
-// Delete Product
-// Delete Product
 router.delete("/delete-product/:id", async (req, res) => {
     try {
-        const deletedProduct = await Product.findOneAndDelete({
+        const { userDetails } = req.body;
+
+        // Get product details before deletion for logging
+        const productToDelete = await Product.findOne({
             productId: req.params.id
         });
 
-        if (!deletedProduct) {
+        if (!productToDelete) {
             return res.status(404).json({
                 message: "Product not found"
             });
         }
 
+        const deletedProduct = await Product.findOneAndDelete({
+            productId: req.params.id
+        });
+
         // 🔹 Delete inventory entry as well
         await Inventory.findOneAndDelete({ productId: req.params.id });
+
+        // ✅ ADD USER LOGGING
+        console.log('📝 PRODUCT DELETED:', {
+            productId: deletedProduct.productId,
+            productName: deletedProduct.productName,
+            category: deletedProduct.category,
+            price: deletedProduct.price,
+            taxSlab: deletedProduct.taxSlab,
+            user: userDetails ? `${userDetails.name} (${userDetails.email})` : 'Unknown User',
+            timestamp: new Date().toISOString()
+        });
 
         res.status(200).json({
             message: "Product and its inventory deleted successfully"
         });
     } catch (error) {
         console.error("Error deleting product:", error);
+
+        // ✅ ADD ERROR LOGGING
+        console.error('❌ PRODUCT DELETION FAILED:', {
+            productId: req.params.id,
+            user: req.body.userDetails ? `${req.body.userDetails.name}` : 'Unknown User',
+            error: error.message,
+            timestamp: new Date().toISOString()
+        });
+
         res.status(500).json({
             message: "Failed to delete product",
             error: error.message

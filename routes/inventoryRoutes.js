@@ -97,23 +97,28 @@ router.get("/get-inventory", async (req, res) => {
     }
 });
 
-// Add batches to product
 router.post("/add-batches", async (req, res) => {
     try {
         console.log("🔍 ADD-BATCHES REQUEST BODY:", req.body);
 
-        const { productId, batches, price } = req.body;
+        const { productId, batches, price, userDetails } = req.body; // ✅ ADDED userDetails
 
         if (!productId || !Array.isArray(batches) || !price) {
             console.log("❌ VALIDATION FAILED - Missing required fields");
-            console.log("   productId:", productId);
-            console.log("   batches:", batches);
-            console.log("   price:", price);
             return res.status(400).json({
                 success: false,
                 message: "Product ID, batches array, and price are required"
             });
         }
+
+        // ✅ ADD USER LOGGING FOR REQUEST
+        console.log('👤 ADD BATCHES REQUEST BY:', {
+            user: userDetails ? `${userDetails.name} (${userDetails.email})` : 'Unknown User',
+            productId: productId,
+            batchesCount: batches.length,
+            price: price,
+            timestamp: new Date().toISOString()
+        });
 
         // Find the product
         const product = await Product.findOne({ productId });
@@ -145,6 +150,7 @@ router.post("/add-batches", async (req, res) => {
         let updatedBatches = 0;
         const errors = [];
         const newBatchNumbers = [];
+        const batchDetails = []; // ✅ FOR LOGGING
 
         console.log("🔄 PROCESSING BATCHES:", batches);
 
@@ -203,8 +209,20 @@ router.post("/add-batches", async (req, res) => {
                         continue;
                     } else {
                         console.log("   ✅ SAME DATE - UPDATING QUANTITY");
+                        const oldQuantity = inventoryItem.batches[existingBatchIndex].quantity;
                         inventoryItem.batches[existingBatchIndex].quantity += parseInt(batch.quantity);
                         updatedBatches++;
+
+                        // ✅ ADD BATCH DETAIL FOR LOGGING
+                        batchDetails.push({
+                            batchNumber: batch.batchNumber,
+                            action: 'UPDATED',
+                            oldQuantity: oldQuantity,
+                            newQuantity: inventoryItem.batches[existingBatchIndex].quantity,
+                            quantityAdded: parseInt(batch.quantity),
+                            manufactureDate: newManufacture
+                        });
+
                         console.log(`✅ Updated existing batch ${batch.batchNumber} - Added ${batch.quantity} units`);
                     }
                 } else {
@@ -220,6 +238,16 @@ router.post("/add-batches", async (req, res) => {
                     inventoryItem.batches.push(newBatch);
                     newBatchNumbers.push(batch.batchNumber);
                     addedBatches++;
+
+                    // ✅ ADD BATCH DETAIL FOR LOGGING
+                    batchDetails.push({
+                        batchNumber: batch.batchNumber,
+                        action: 'ADDED',
+                        quantity: parseInt(batch.quantity),
+                        manufactureDate: manufactureDate.toISOString().substring(0, 7),
+                        expiryDate: expiryDate.toISOString().substring(0, 7)
+                    });
+
                     console.log(`✅ Added new batch ${batch.batchNumber} with ${batch.quantity} units`);
                 }
             } catch (batchError) {
@@ -263,6 +291,21 @@ router.post("/add-batches", async (req, res) => {
         await inventoryItem.save();
         console.log("💾 INVENTORY SAVED SUCCESSFULLY");
 
+        // ✅ ADD COMPREHENSIVE USER LOGGING FOR SUCCESS
+        console.log('📝 BATCHES ADDED/UPDATE SUCCESS:', {
+            productId: productId,
+            productName: product.productName,
+            user: userDetails ? `${userDetails.name} (${userDetails.email})` : 'Unknown User',
+            addedBatches: addedBatches,
+            updatedBatches: updatedBatches,
+            totalBatchesProcessed: addedBatches + updatedBatches,
+            totalQuantityAdded: batchDetails.reduce((sum, batch) => sum + (batch.quantityAdded || batch.quantity || 0), 0),
+            pricePerUnit: price,
+            batchDetails: batchDetails,
+            errorsCount: errors.length,
+            timestamp: new Date().toISOString()
+        });
+
         // ✅ FIX: Return success even if only updates happened
         let successMessage = "";
         if (addedBatches > 0 && updatedBatches > 0) {
@@ -287,6 +330,15 @@ router.post("/add-batches", async (req, res) => {
 
     } catch (error) {
         console.error("💥 ERROR IN ADD-BATCHES:", error);
+
+        // ✅ ADD ERROR LOGGING WITH USER DETAILS
+        console.error('❌ BATCH ADDITION FAILED:', {
+            productId: req.body.productId,
+            user: req.body.userDetails ? `${req.body.userDetails.name}` : 'Unknown User',
+            error: error.message,
+            timestamp: new Date().toISOString()
+        });
+
         res.status(500).json({
             success: false,
             message: "Failed to add batches",
@@ -295,7 +347,6 @@ router.post("/add-batches", async (req, res) => {
     }
 });
 
-// Bulk upload batches from Excel (UPDATED FOR YEAR-MONTH)
 router.post("/bulk-upload-batches", upload.single('file'), async (req, res) => {
     try {
         if (!req.file) {
@@ -306,6 +357,24 @@ router.post("/bulk-upload-batches", upload.single('file'), async (req, res) => {
         }
 
         console.log("Processing uploaded file:", req.file.path);
+
+        let userDetails = null;
+        if (req.body.userDetails) {
+            try {
+                userDetails = JSON.parse(req.body.userDetails);
+            } catch (parseError) {
+                console.error("Error parsing userDetails:", parseError);
+            }
+        }
+
+        // ✅ ADD USER LOGGING FOR BULK UPLOAD START
+        console.log('👤 BULK UPLOAD STARTED:', {
+            user: userDetails ? `${userDetails.name} (${userDetails.email})` : 'Unknown User',
+            userId: userDetails?.userId || 'Unknown',
+            fileName: req.file.originalname,
+            fileSize: req.file.size,
+            timestamp: new Date().toISOString()
+        });
 
         const workbook = XLSX.readFile(req.file.path);
         const sheetName = workbook.SheetNames[0];
@@ -502,6 +571,7 @@ router.post("/bulk-upload-batches", upload.single('file'), async (req, res) => {
                         continue;
                     } else {
                         // Same batch name and same manufacture month - update quantity
+                        const oldQuantity = inventoryItem.batches[existingBatchIndex].quantity;
                         inventoryItem.batches[existingBatchIndex].quantity += parseInt(quantity);
                         updatedBatches++;
                         console.log(`Updated existing batch ${batchNumber} for product ${product.productName}`);
@@ -563,6 +633,19 @@ router.post("/bulk-upload-batches", upload.single('file'), async (req, res) => {
 
         console.log(`Bulk upload completed. Added: ${addedBatches} batches, Updated: ${updatedBatches} batches. Errors: ${errors.length}`);
 
+        // ✅ ADD COMPREHENSIVE USER LOGGING FOR BULK UPLOAD SUCCESS
+        console.log('📝 BULK UPLOAD COMPLETED:', {
+            user: userDetails ? `${userDetails.name} (${userDetails.email})` : 'Unknown User',
+            fileName: req.file.originalname,
+            totalRows: data.length,
+            addedBatches: addedBatches,
+            updatedBatches: updatedBatches,
+            totalBatchesProcessed: addedBatches + updatedBatches,
+            errorsCount: errors.length,
+            productsAffected: Object.keys(productPriceHistory).length,
+            timestamp: new Date().toISOString()
+        });
+
         res.status(200).json({
             success: true,
             message: `Bulk upload completed. Added: ${addedBatches}, Updated: ${updatedBatches}, Errors: ${errors.length}`,
@@ -574,6 +657,14 @@ router.post("/bulk-upload-batches", upload.single('file'), async (req, res) => {
 
     } catch (error) {
         console.error("Error in bulk upload:", error);
+
+        // ✅ ADD ERROR LOGGING WITH USER DETAILS
+        console.error('❌ BULK UPLOAD FAILED:', {
+            user: req.body.userDetails ? `${req.body.userDetails.name}` : 'Unknown User',
+            fileName: req.file?.originalname || 'Unknown',
+            error: error.message,
+            timestamp: new Date().toISOString()
+        });
 
         // Clean up file if it exists
         if (req.file && fs.existsSync(req.file.path)) {
