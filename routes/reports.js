@@ -510,6 +510,195 @@ router.get("/inventory-expiry", async (req, res) => {
 
 
 // Category Analysis Report
+
+
+// router.get("/category-analysis", async (req, res) => {
+//     try {
+//         const {
+//             category = 'all',
+//             filter = 'month',
+//             startDate,
+//             endDate
+//         } = req.query;
+
+//         const dateRange = getDateRange(filter, startDate, endDate);
+
+//         // Get all categories from products
+//         const allCategories = await Inventory.distinct('category');
+
+//         // Get sales data from invoices
+//         const invoices = await Invoice.find({
+//             createdAt: {
+//                 $gte: dateRange.startDate,
+//                 $lte: dateRange.endDate
+//             }
+//         });
+
+//         // Get purchase data from inventory price history
+//         const inventoryItems = await Inventory.find({
+//             "priceHistory.addedAt": {
+//                 $gte: dateRange.startDate,
+//                 $lte: dateRange.endDate
+//             }
+//         });
+
+//         // Get current stock data
+//         const currentInventory = await Inventory.find({});
+
+//         // Calculate category-wise data
+//         const categoryData = {};
+
+//         // Initialize all categories
+//         allCategories.forEach(cat => {
+//             categoryData[cat] = {
+//                 category: cat,
+//                 sales: {
+//                     totalSales: 0,
+//                     totalQuantity: 0,
+//                     totalOrders: 0,
+//                     totalTax: 0,
+//                     totalDiscount: 0,
+//                     averageOrderValue: 0
+//                 },
+//                 purchases: {
+//                     totalPurchaseValue: 0,
+//                     totalQuantity: 0,
+//                     totalTransactions: 0,
+//                     averagePurchasePrice: 0
+//                 },
+//                 stock: {
+//                     totalQuantity: 0,
+//                     totalValue: 0,
+//                     totalProducts: 0,
+//                     lowStockProducts: 0,
+//                     outOfStockProducts: 0
+//                 },
+//                 products: []
+//             };
+//         });
+
+//         // Process Sales Data
+//         invoices.forEach(invoice => {
+//             invoice.items.forEach(item => {
+//                 if (categoryData[item.category]) {
+//                     categoryData[item.category].sales.totalSales += item.totalAmount;
+//                     categoryData[item.category].sales.totalQuantity += item.quantity;
+//                     categoryData[item.category].sales.totalTax += item.taxAmount;
+//                     categoryData[item.category].sales.totalDiscount += item.discountAmount;
+
+//                     // Add product to category products list if not exists
+//                     if (!categoryData[item.category].products.includes(item.productId)) {
+//                         categoryData[item.category].products.push(item.productId);
+//                     }
+//                 }
+//             });
+
+//             // Count orders per category
+//             const categoriesInInvoice = [...new Set(invoice.items.map(item => item.category))];
+//             categoriesInInvoice.forEach(cat => {
+//                 if (categoryData[cat]) {
+//                     categoryData[cat].sales.totalOrders += 1;
+//                 }
+//             });
+//         });
+
+//         // Process Purchase Data
+//         inventoryItems.forEach(item => {
+//             item.priceHistory.forEach(history => {
+//                 const historyDate = new Date(history.addedAt);
+//                 if (historyDate >= dateRange.startDate && historyDate <= dateRange.endDate) {
+//                     if (categoryData[item.category]) {
+//                         const purchaseValue = history.price * history.quantityAdded;
+//                         categoryData[item.category].purchases.totalPurchaseValue += purchaseValue;
+//                         categoryData[item.category].purchases.totalQuantity += history.quantityAdded;
+//                         categoryData[item.category].purchases.totalTransactions += 1;
+//                     }
+//                 }
+//             });
+//         });
+
+//         // Process Current Stock Data
+//         currentInventory.forEach(item => {
+//             if (categoryData[item.category]) {
+//                 categoryData[item.category].stock.totalQuantity += item.totalQuantity;
+//                 categoryData[item.category].stock.totalValue += (item.totalQuantity * (item.priceHistory[0]?.price || 0));
+//                 categoryData[item.category].stock.totalProducts += 1;
+
+//                 if (item.totalQuantity === 0) {
+//                     categoryData[item.category].stock.outOfStockProducts += 1;
+//                 } else if (item.totalQuantity <= 10) {
+//                     categoryData[item.category].stock.lowStockProducts += 1;
+//                 }
+//             }
+//         });
+
+//         // Calculate averages and finalize data
+//         Object.keys(categoryData).forEach(cat => {
+//             const data = categoryData[cat];
+
+//             // Sales averages
+//             if (data.sales.totalOrders > 0) {
+//                 data.sales.averageOrderValue = data.sales.totalSales / data.sales.totalOrders;
+//             }
+
+//             // Purchase averages
+//             if (data.purchases.totalQuantity > 0) {
+//                 data.purchases.averagePurchasePrice = data.purchases.totalPurchaseValue / data.purchases.totalQuantity;
+//             }
+
+//             // Calculate growth percentages (you can enhance this with historical data)
+//             data.sales.growth = 12.5; // Mock data - replace with actual calculation
+//             data.purchases.growth = 8.3; // Mock data - replace with actual calculation
+//         });
+
+//         // Convert to array and sort by total sales
+//         let resultData = Object.values(categoryData).sort((a, b) => b.sales.totalSales - a.sales.totalSales);
+
+//         // Filter by specific category if selected
+//         if (category !== 'all') {
+//             resultData = resultData.filter(item => item.category === category);
+//         }
+
+//         // Calculate overall summary
+//         const summary = {
+//             totalCategories: resultData.length,
+//             totalSales: resultData.reduce((sum, item) => sum + item.sales.totalSales, 0),
+//             totalPurchases: resultData.reduce((sum, item) => sum + item.purchases.totalPurchaseValue, 0),
+//             totalStockValue: resultData.reduce((sum, item) => sum + item.stock.totalValue, 0),
+//             totalProducts: resultData.reduce((sum, item) => sum + item.stock.totalProducts, 0),
+//             totalOrders: resultData.reduce((sum, item) => sum + item.sales.totalOrders, 0)
+//         };
+
+//         res.status(200).json({
+//             success: true,
+//             data: {
+//                 categories: resultData,
+//                 summary,
+//                 filters: {
+//                     categories: allCategories,
+//                     selectedCategory: category
+//                 },
+//                 dateRange: {
+//                     start: dateRange.startDate,
+//                     end: dateRange.endDate,
+//                     filterType: filter
+//                 }
+//             }
+//         });
+
+//     } catch (error) {
+//         console.error("Error generating category analysis:", error);
+//         res.status(500).json({
+//             success: false,
+//             message: "Failed to generate category analysis",
+//             error: error.message
+//         });
+//     }
+// });
+
+
+
+// Category Analysis Report - UPDATED WITH PRODUCT DATA
 router.get("/category-analysis", async (req, res) => {
     try {
         const {
@@ -657,6 +846,120 @@ router.get("/category-analysis", async (req, res) => {
             resultData = resultData.filter(item => item.category === category);
         }
 
+        // ========== NEW: GET PRODUCT DETAILS FOR EACH CATEGORY ==========
+        const categoryProducts = {};
+
+        for (const categoryObj of resultData) {
+            const cat = categoryObj.category;
+
+            // Get all products in this category
+            const productsInCategory = await Inventory.find({ category: cat });
+            const productSalesData = {};
+
+            // Calculate sales data for each product in this category
+            invoices.forEach(invoice => {
+                invoice.items.forEach(item => {
+                    if (item.category === cat) {
+                        if (!productSalesData[item.productId]) {
+                            productSalesData[item.productId] = {
+                                productId: item.productId,
+                                name: item.name,
+                                category: item.category,
+                                totalSales: 0,
+                                totalQuantity: 0,
+                                totalOrders: 0,
+                                totalTax: 0,
+                                totalDiscount: 0
+                            };
+                        }
+                        productSalesData[item.productId].totalSales += item.totalAmount;
+                        productSalesData[item.productId].totalQuantity += item.quantity;
+                        productSalesData[item.productId].totalTax += item.taxAmount;
+                        productSalesData[item.productId].totalDiscount += item.discountAmount;
+                    }
+                });
+            });
+
+            // Count orders per product
+            invoices.forEach(invoice => {
+                const productsInInvoice = [...new Set(invoice.items.map(item => item.productId))];
+                productsInInvoice.forEach(productId => {
+                    if (productSalesData[productId]) {
+                        productSalesData[productId].totalOrders += 1;
+                    }
+                });
+            });
+
+            // Get purchase data for each product
+            const productPurchaseData = {};
+            inventoryItems.forEach(item => {
+                if (item.category === cat) {
+                    if (!productPurchaseData[item.productId]) {
+                        productPurchaseData[item.productId] = {
+                            totalPurchaseValue: 0,
+                            totalQuantity: 0,
+                            totalTransactions: 0
+                        };
+                    }
+
+                    item.priceHistory.forEach(history => {
+                        const historyDate = new Date(history.addedAt);
+                        if (historyDate >= dateRange.startDate && historyDate <= dateRange.endDate) {
+                            const purchaseValue = history.price * history.quantityAdded;
+                            productPurchaseData[item.productId].totalPurchaseValue += purchaseValue;
+                            productPurchaseData[item.productId].totalQuantity += history.quantityAdded;
+                            productPurchaseData[item.productId].totalTransactions += 1;
+                        }
+                    });
+                }
+            });
+
+            // Get stock data for each product
+            const productStockData = {};
+            currentInventory.forEach(item => {
+                if (item.category === cat) {
+                    productStockData[item.productId] = {
+                        totalQuantity: item.totalQuantity,
+                        totalValue: item.totalQuantity * (item.priceHistory[0]?.price || 0),
+                        currentPrice: item.priceHistory[0]?.price || 0
+                    };
+                }
+            });
+
+            // Combine all product data for this category
+            categoryProducts[cat] = productsInCategory.map(product => {
+                const sales = productSalesData[product.productId] || {};
+                const purchases = productPurchaseData[product.productId] || {};
+                const stock = productStockData[product.productId] || {};
+
+                return {
+                    productId: product.productId,
+                    productName: product.productName,
+                    category: product.category,
+                    sales: {
+                        totalSales: sales.totalSales || 0,
+                        totalQuantity: sales.totalQuantity || 0,
+                        totalOrders: sales.totalOrders || 0,
+                        totalTax: sales.totalTax || 0,
+                        totalDiscount: sales.totalDiscount || 0,
+                        averageOrderValue: sales.totalOrders > 0 ? (sales.totalSales / sales.totalOrders) : 0
+                    },
+                    purchases: {
+                        totalPurchaseValue: purchases.totalPurchaseValue || 0,
+                        totalQuantity: purchases.totalQuantity || 0,
+                        totalTransactions: purchases.totalTransactions || 0,
+                        averagePurchasePrice: purchases.totalQuantity > 0 ? (purchases.totalPurchaseValue / purchases.totalQuantity) : 0
+                    },
+                    stock: {
+                        totalQuantity: stock.totalQuantity || 0,
+                        totalValue: stock.totalValue || 0,
+                        currentPrice: stock.currentPrice || 0
+                    }
+                };
+            });
+        }
+        // ========== END OF NEW PRODUCT DATA CODE ==========
+
         // Calculate overall summary
         const summary = {
             totalCategories: resultData.length,
@@ -671,6 +974,7 @@ router.get("/category-analysis", async (req, res) => {
             success: true,
             data: {
                 categories: resultData,
+                categoryProducts: categoryProducts, // NEW: Added product data
                 summary,
                 filters: {
                     categories: allCategories,
