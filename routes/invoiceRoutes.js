@@ -5,6 +5,7 @@ const Invoice = require("../models/invoiceModel");
 const GlobalCounter = require("../models/globalCounter");
 const Inventory = require("../models/inventory");
 const DeletedInvoice = require("../models/deletedInvoiceModel");
+const InvoiceUpdateHistory = require("../models/invoiceUpdateHistory");
 
 
 
@@ -914,5 +915,543 @@ router.post("/bulk-import-invoices", async (req, res) => {
   }
 });
 
+
+// Update invoice products with inventory synchronization - COMPLETE FIXED VERSION
+router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
+  const requestId = `UPDATE_PROD_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  const updateHistoryId = `INV_UPDATE_${Date.now()}`;
+
+  try {
+    const { invoiceNumber } = req.params;
+    const { updatedItems, originalItems, userDetails } = req.body;
+
+    console.log(`🔄 [${requestId}] Starting invoice products update`);
+    console.log(`📥 [${requestId}] Update details:`, {
+      invoiceNumber,
+      originalItemsCount: originalItems.length,
+      updatedItemsCount: updatedItems.length,
+      user: userDetails?.name || 'Unknown'
+    });
+
+    // Find original invoice
+    const originalInvoice = await Invoice.findOne({ invoiceNumber });
+    if (!originalInvoice) {
+      return res.status(404).json({
+        success: false,
+        message: "Invoice not found"
+      });
+    }
+
+    // Initialize update history
+    const updateHistory = {
+      updateId: updateHistoryId,
+      originalInvoiceNumber: invoiceNumber,
+      updatedBy: userDetails,
+      changes: {
+        itemsAdded: [],
+        itemsRemoved: [],
+        itemsUpdated: [],
+        productsChanged: []
+      },
+      inventoryUpdates: [],
+      calculationChanges: {
+        oldTotal: originalInvoice.total,
+        newTotal: 0,
+        oldLoyaltyCoinsEarned: originalInvoice.loyaltyCoinsEarned || 0,
+        newLoyaltyCoinsEarned: 0
+      }
+    };
+
+    // Step 1: Calculate inventory changes and validate
+    const inventoryOperations = [];
+    const validationErrors = [];
+
+    // Find removed items (in original but not in updated)
+    const removedItems = originalItems.filter(originalItem =>
+      !updatedItems.some(updatedItem =>
+        updatedItem.productId === originalItem.productId &&
+        updatedItem.batchNumber === originalItem.batchNumber
+      )
+    );
+
+    // Find added items (in updated but not in original)
+    const addedItems = updatedItems.filter(updatedItem =>
+      !originalItems.some(originalItem =>
+        originalItem.productId === updatedItem.productId &&
+        originalItem.batchNumber === updatedItem.batchNumber
+      )
+    );
+
+    // Find updated items (same product+batch but different quantity)
+    const updatedExistingItems = updatedItems.filter(updatedItem => {
+      const originalItem = originalItems.find(item =>
+        item.productId === updatedItem.productId &&
+        item.batchNumber === updatedItem.batchNumber
+      );
+
+      if (!originalItem) return false;
+
+      console.log(`🔍 Quantity comparison for ${updatedItem.name}:`, {
+        originalQuantity: originalItem.quantity,
+        updatedQuantity: updatedItem.quantity,
+        different: originalItem.quantity !== updatedItem.quantity
+      });
+
+      return originalItem.quantity !== updatedItem.quantity;
+    });
+
+    // Validate inventory for ADDED items
+    for (const item of addedItems) {
+      const inventoryItem = await Inventory.findOne({ productId: item.productId });
+
+      if (!inventoryItem) {
+        validationErrors.push({
+          productId: item.productId,
+          productName: item.name,
+          error: "Product not found in inventory"
+        });
+        continue;
+      }
+
+      const batch = inventoryItem.batches.find(b => b.batchNumber === item.batchNumber);
+      if (!batch) {
+        validationErrors.push({
+          productId: item.productId,
+          productName: item.name,
+          batchNumber: item.batchNumber,
+          error: "Batch not found"
+        });
+        continue;
+      }
+
+      if (batch.quantity < item.quantity) {
+        validationErrors.push({
+          productId: item.productId,
+          productName: item.name,
+          batchNumber: item.batchNumber,
+          error: "Insufficient quantity",
+          available: batch.quantity,
+          requested: item.quantity
+        });
+        continue;
+      }
+
+      // Add to inventory operations (DEDUCT for added items)
+      inventoryOperations.push({
+        type: 'DEDUCT',
+        productId: item.productId,
+        batchNumber: item.batchNumber,
+        quantity: item.quantity,
+        inventoryItem,
+        batch
+      });
+
+      updateHistory.changes.itemsAdded.push({
+        productId: item.productId,
+        productName: item.name,
+        batchNumber: item.batchNumber,
+        quantity: item.quantity,
+        price: item.price
+      });
+    }
+
+    // Validate inventory for UPDATED items (quantity changes)
+    for (const item of updatedExistingItems) {
+      const originalItem = originalItems.find(oi =>
+        oi.productId === item.productId && oi.batchNumber === item.batchNumber
+      );
+
+      const quantityDifference = item.quantity - originalItem.quantity;
+
+      if (quantityDifference > 0) {
+        // Increasing quantity - need to check inventory
+        const inventoryItem = await Inventory.findOne({ productId: item.productId });
+
+        if (!inventoryItem) {
+          validationErrors.push({
+            productId: item.productId,
+            productName: item.name,
+            error: "Product not found in inventory"
+          });
+          continue;
+        }
+
+        const batch = inventoryItem.batches.find(b => b.batchNumber === item.batchNumber);
+        if (!batch) {
+          validationErrors.push({
+            productId: item.productId,
+            productName: item.name,
+            batchNumber: item.batchNumber,
+            error: "Batch not found"
+          });
+          continue;
+        }
+
+        if (batch.quantity < quantityDifference) {
+          validationErrors.push({
+            productId: item.productId,
+            productName: item.name,
+            batchNumber: item.batchNumber,
+            error: "Insufficient quantity for increase",
+            available: batch.quantity,
+            needed: quantityDifference
+          });
+          continue;
+        }
+
+        inventoryOperations.push({
+          type: 'DEDUCT',
+          productId: item.productId,
+          batchNumber: item.batchNumber,
+          quantity: quantityDifference,
+          inventoryItem,
+          batch
+        });
+      } else if (quantityDifference < 0) {
+        // Decreasing quantity - add back to inventory
+        const inventoryItem = await Inventory.findOne({ productId: item.productId });
+
+        if (inventoryItem) {
+          const batch = inventoryItem.batches.find(b => b.batchNumber === item.batchNumber);
+          if (batch) {
+            inventoryOperations.push({
+              type: 'ADD',
+              productId: item.productId,
+              batchNumber: item.batchNumber,
+              quantity: Math.abs(quantityDifference),
+              inventoryItem,
+              batch
+            });
+          }
+        }
+      }
+
+      updateHistory.changes.itemsUpdated.push({
+        productId: item.productId,
+        productName: item.name,
+        batchNumber: item.batchNumber,
+        oldQuantity: originalItem.quantity,
+        newQuantity: item.quantity,
+        quantityDifference: quantityDifference
+      });
+    }
+
+    // Handle REMOVED items (add back to inventory)
+    for (const item of removedItems) {
+      const inventoryItem = await Inventory.findOne({ productId: item.productId });
+
+      if (inventoryItem) {
+        const batch = inventoryItem.batches.find(b => b.batchNumber === item.batchNumber);
+        if (batch) {
+          inventoryOperations.push({
+            type: 'ADD',
+            productId: item.productId,
+            batchNumber: item.batchNumber,
+            quantity: item.quantity,
+            inventoryItem,
+            batch
+          });
+        }
+      }
+
+      updateHistory.changes.itemsRemoved.push({
+        productId: item.productId,
+        productName: item.name,
+        batchNumber: item.batchNumber,
+        quantity: item.quantity,
+        price: item.price
+      });
+    }
+
+    // If validation errors, abort - NO STOCK UPDATES
+    if (validationErrors.length > 0) {
+      console.log(`❌ [${requestId}] Validation failed - no stock updates made`);
+
+      updateHistory.status = 'FAILED';
+      updateHistory.errorDetails = JSON.stringify(validationErrors);
+      await InvoiceUpdateHistory.create(updateHistory);
+
+      return res.status(400).json({
+        success: false,
+        message: "Inventory validation failed",
+        errors: validationErrors
+      });
+    }
+
+    console.log(`✅ [${requestId}] All validations passed - proceeding with updates`);
+
+    // Step 2: Execute inventory updates FIRST
+    console.log(`📦 [${requestId}] Starting inventory updates for ${inventoryOperations.length} operations`);
+
+    const inventoryUpdates = [];
+    for (const operation of inventoryOperations) {
+      const beforeQuantity = operation.batch.quantity;
+
+      if (operation.type === 'ADD') {
+        operation.batch.quantity += operation.quantity;
+      } else if (operation.type === 'DEDUCT') {
+        operation.batch.quantity -= operation.quantity;
+      }
+
+      const afterQuantity = operation.batch.quantity;
+
+      // Save inventory item
+      await operation.inventoryItem.save();
+
+      inventoryUpdates.push({
+        productId: operation.productId,
+        productName: operation.inventoryItem.productName,
+        batchNumber: operation.batchNumber,
+        quantityChange: operation.type === 'ADD' ? operation.quantity : -operation.quantity,
+        operation: operation.type,
+        beforeQuantity,
+        afterQuantity
+      });
+
+      console.log(`📦 [${requestId}] Inventory ${operation.type}:`, {
+        product: operation.inventoryItem.productName,
+        batch: operation.batchNumber,
+        change: operation.quantity,
+        before: beforeQuantity,
+        after: afterQuantity
+      });
+    }
+
+    updateHistory.inventoryUpdates = inventoryUpdates;
+    console.log(`✅ [${requestId}] All inventory updates completed successfully`);
+
+    // Step 3: Update invoice with new items and recalculate - COMPLETE RECALCULATION
+    console.log(`💾 [${requestId}] Updating invoice data...`);
+
+    const updatedInvoiceData = {
+      ...originalInvoice.toObject(),
+      items: updatedItems,
+      updatedAt: new Date()
+    };
+
+    // COMPLETE RECALCULATION: Recalculate ALL totals including promo and loyalty
+    const recalculatedTotals = recalculateInvoiceTotalsWithDiscounts(updatedItems, originalInvoice);
+    Object.assign(updatedInvoiceData, recalculatedTotals);
+
+    // Calculate loyalty coins difference
+    const oldLoyaltyCoins = originalInvoice.loyaltyCoinsEarned || 0;
+    const newLoyaltyCoins = recalculatedTotals.loyaltyCoinsEarned || 0;
+    const loyaltyCoinsDifference = newLoyaltyCoins - oldLoyaltyCoins;
+
+    updateHistory.calculationChanges.newTotal = recalculatedTotals.total;
+    updateHistory.calculationChanges.difference = recalculatedTotals.total - updateHistory.calculationChanges.oldTotal;
+    updateHistory.calculationChanges.newLoyaltyCoinsEarned = newLoyaltyCoins;
+    updateHistory.calculationChanges.loyaltyCoinsDifference = loyaltyCoinsDifference;
+
+    // Update customer loyalty coins if there's a difference
+    if (loyaltyCoinsDifference !== 0 && originalInvoice.customer?.customerId) {
+      try {
+        console.log(`🪙 [${requestId}] Updating customer loyalty coins:`, {
+          customerId: originalInvoice.customer.customerId,
+          oldCoins: oldLoyaltyCoins,
+          newCoins: newLoyaltyCoins,
+          difference: loyaltyCoinsDifference
+        });
+
+        // Call customer update API to adjust loyalty coins
+        const customerResponse = await axios.put(
+          `${process.env.VITE_API_URL}/customer/update-loyalty-coins/${originalInvoice.customer.customerId}`,
+          {
+            coinsEarned: loyaltyCoinsDifference > 0 ? loyaltyCoinsDifference : 0,
+            coinsUsed: 0 // No coins used in product update
+          }
+        );
+
+        console.log(`✅ [${requestId}] Customer loyalty coins updated:`, customerResponse.data);
+      } catch (customerError) {
+        console.error(`❌ [${requestId}] Failed to update customer loyalty coins:`, customerError.message);
+        // Continue with invoice update even if loyalty coins update fails
+      }
+    }
+
+    const updatedInvoice = await Invoice.findOneAndUpdate(
+      { invoiceNumber },
+      updatedInvoiceData,
+      { new: true }
+    );
+
+    // Step 4: Save update history
+    updateHistory.status = 'SUCCESS';
+    await InvoiceUpdateHistory.create(updateHistory);
+
+    console.log(`✅ [${requestId}] Invoice products updated successfully:`, {
+      invoiceNumber,
+      itemsAdded: updateHistory.changes.itemsAdded.length,
+      itemsRemoved: updateHistory.changes.itemsRemoved.length,
+      itemsUpdated: updateHistory.changes.itemsUpdated.length,
+      inventoryUpdates: updateHistory.inventoryUpdates.length,
+      totalChange: updateHistory.calculationChanges.difference,
+      loyaltyCoinsChange: updateHistory.calculationChanges.loyaltyCoinsDifference
+    });
+
+    // Log user action
+    console.log('📝 INVOICE PRODUCTS UPDATED:', {
+      invoiceNumber: invoiceNumber,
+      user: userDetails ? `${userDetails.name} (${userDetails.email})` : 'Unknown User',
+      changes: updateHistory.changes,
+      totalChange: updateHistory.calculationChanges.difference,
+      loyaltyCoinsChange: updateHistory.calculationChanges.loyaltyCoinsDifference,
+      timestamp: new Date().toISOString()
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Invoice products updated successfully",
+      data: updatedInvoice,
+      updateSummary: {
+        itemsAdded: updateHistory.changes.itemsAdded.length,
+        itemsRemoved: updateHistory.changes.itemsRemoved.length,
+        itemsUpdated: updateHistory.changes.itemsUpdated.length,
+        totalChange: updateHistory.calculationChanges.difference,
+        loyaltyCoinsChange: updateHistory.calculationChanges.loyaltyCoinsDifference
+      }
+    });
+
+  } catch (error) {
+    console.error(`💥 [${requestId}] Error updating invoice products:`, error);
+
+    // Save failed update history
+    try {
+      await InvoiceUpdateHistory.create({
+        updateId: updateHistoryId,
+        originalInvoiceNumber: req.params.invoiceNumber,
+        updatedBy: req.body.userDetails,
+        status: 'FAILED',
+        errorDetails: error.message,
+        timestamp: new Date()
+      });
+    } catch (historyError) {
+      console.error(`❌ [${requestId}] Failed to save update history:`, historyError);
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to update invoice products",
+      error: error.message
+    });
+  }
+});
+
+// COMPLETE RECALCULATION FUNCTION with Promo and Loyalty Coins
+function recalculateInvoiceTotalsWithDiscounts(items, originalInvoice) {
+  let subtotal = 0;
+  let totalDiscountAmount = 0;
+  let totalBaseValue = 0;
+  let totalTaxAmount = 0;
+  let cgstAmount = 0;
+  let sgstAmount = 0;
+  const taxPercentages = new Set();
+
+  // First calculate amount after all discounts
+  let amountAfterAllDiscounts = 0;
+
+  const itemsWithCalculations = items.map(item => {
+    const quantity = item.quantity || 1;
+    const taxRate = item.taxSlab || 18;
+    const discountPercentage = item.discount || 0;
+
+    taxPercentages.add(taxRate);
+
+    const itemTotalInclTax = (item.price || 0) * quantity;
+    const itemDiscountAmount = itemTotalInclTax * (discountPercentage / 100);
+    const itemTotalAfterDiscount = itemTotalInclTax - itemDiscountAmount;
+
+    subtotal += itemTotalInclTax;
+    totalDiscountAmount += itemDiscountAmount;
+    amountAfterAllDiscounts += itemTotalAfterDiscount;
+
+    return {
+      ...item,
+      discountAmount: itemDiscountAmount,
+      totalAmount: itemTotalAfterDiscount
+    };
+  });
+
+  // RECALCULATE PROMO DISCOUNT based on new amountAfterAllDiscounts
+  let promoDiscountAmount = 0;
+  if (originalInvoice.appliedPromoCode) {
+    promoDiscountAmount = amountAfterAllDiscounts * (originalInvoice.appliedPromoCode.discount / 100);
+  }
+
+  // Amount after promo discount
+  const amountAfterPromo = amountAfterAllDiscounts - promoDiscountAmount;
+
+  // RECALCULATE LOYALTY DISCOUNT based on new amountAfterPromo
+  let loyaltyDiscountAmount = 0;
+  let actualLoyaltyCoinsUsed = 0;
+
+  // If original invoice had loyalty coins used, recalculate based on new amount
+  if (originalInvoice.loyaltyCoinsUsed > 0) {
+    // Use the same loyalty coins used amount, but ensure it doesn't exceed the new amountAfterPromo
+    loyaltyDiscountAmount = Math.min(originalInvoice.loyaltyCoinsUsed, amountAfterPromo);
+    actualLoyaltyCoinsUsed = Math.floor(loyaltyDiscountAmount);
+  }
+
+  // Final amount after ALL discounts (promo + loyalty)
+  const finalAmountAfterAllDiscounts = amountAfterPromo - loyaltyDiscountAmount;
+
+  // Calculate tax on the final amount after ALL discounts
+  const itemsWithTaxCalculations = itemsWithCalculations.map(item => {
+    const taxRate = item.taxSlab || 18;
+
+    // Calculate tax based on final discounted amount for this item
+    const itemFinalAmount = (item.totalAmount / amountAfterAllDiscounts) * finalAmountAfterAllDiscounts;
+    const itemBaseValue = itemFinalAmount / (1 + taxRate / 100);
+    const itemTaxAmount = itemFinalAmount - itemBaseValue;
+    const itemCgstAmount = taxPercentages.size === 1 ? itemTaxAmount / 2 : 0;
+    const itemSgstAmount = taxPercentages.size === 1 ? itemTaxAmount / 2 : 0;
+
+    totalBaseValue += itemBaseValue;
+    totalTaxAmount += itemTaxAmount;
+    cgstAmount += itemCgstAmount;
+    sgstAmount += itemSgstAmount;
+
+    return {
+      ...item,
+      baseValue: itemBaseValue,
+      taxAmount: itemTaxAmount,
+      cgstAmount: itemCgstAmount,
+      sgstAmount: itemSgstAmount,
+      finalAmount: itemFinalAmount
+    };
+  });
+
+  const hasMixedTaxRates = taxPercentages.size > 1;
+  if (hasMixedTaxRates) {
+    cgstAmount = 0;
+    sgstAmount = 0;
+  }
+
+  // Final grand total
+  const grandTotal = finalAmountAfterAllDiscounts;
+
+  // CALCULATE NEW LOYALTY COINS EARNED based on new baseValue
+  const loyaltyCoinsEarned = Math.floor(totalBaseValue / 100);
+
+  return {
+    items: itemsWithTaxCalculations,
+    subtotal: subtotal,
+    baseValue: totalBaseValue,
+    discount: totalDiscountAmount,
+    promoDiscount: promoDiscountAmount,
+    loyaltyDiscount: loyaltyDiscountAmount,
+    loyaltyCoinsUsed: actualLoyaltyCoinsUsed,
+    loyaltyCoinsEarned: loyaltyCoinsEarned,
+    tax: totalTaxAmount,
+    cgst: cgstAmount,
+    sgst: sgstAmount,
+    hasMixedTaxRates: hasMixedTaxRates,
+    taxPercentages: Array.from(taxPercentages),
+    amountAfterAllDiscounts: amountAfterAllDiscounts,
+    finalAmountAfterAllDiscounts: finalAmountAfterAllDiscounts,
+    total: grandTotal,
+    appliedPromoCode: originalInvoice.appliedPromoCode // Preserve promo code info
+  };
+}
 
 module.exports = router;

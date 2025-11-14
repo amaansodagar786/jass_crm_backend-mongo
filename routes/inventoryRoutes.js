@@ -177,7 +177,7 @@ router.post("/add-batches", async (req, res) => {
                 }
 
                 const expiryDate = new Date(manufactureDate);
-                expiryDate.setMonth(expiryDate.getMonth() + 36);
+                expiryDate.setMonth(expiryDate.getMonth() + 60);
 
                 console.log("   Manufacture Date:", manufactureDate);
                 console.log("   Expiry Date:", expiryDate);
@@ -394,7 +394,7 @@ router.post("/bulk-upload", upload.single('file'), async (req, res) => {
                 }
 
                 const expiryDate = new Date(manufactureDate);
-                expiryDate.setMonth(expiryDate.getMonth() + 36);
+                expiryDate.setMonth(expiryDate.getMonth() + 60);
 
                 const existingBatchIndex = inventoryItem.batches.findIndex(
                     b => b.batchNumber === batchNumber.trim()
