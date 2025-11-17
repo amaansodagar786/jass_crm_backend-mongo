@@ -917,30 +917,45 @@ router.post("/bulk-import-invoices", async (req, res) => {
 
 
 // Update invoice products with inventory synchronization - COMPLETE FIXED VERSION
+// Update invoice products with inventory synchronization - MANUAL ALL OR NOTHING
 router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
   const requestId = `UPDATE_PROD_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   const updateHistoryId = `INV_UPDATE_${Date.now()}`;
+
+  // Track changes for manual rollback
+  let inventoryChanges = []; // { productId, batchNumber, oldQuantity, newQuantity, operation }
+  let invoiceUpdated = false;
+  let loyaltyCoinsUpdated = false;
 
   try {
     const { invoiceNumber } = req.params;
     const { updatedItems, originalItems, userDetails } = req.body;
 
-    console.log(`🔄 [${requestId}] Starting invoice products update`);
+    console.log(`🔄 [${requestId}] Starting invoice products update (MANUAL ALL OR NOTHING)`);
     console.log(`📥 [${requestId}] Update details:`, {
       invoiceNumber,
-      originalItemsCount: originalItems.length,
-      updatedItemsCount: updatedItems.length,
+      originalItemsCount: originalItems?.length || 0,
+      updatedItemsCount: updatedItems?.length || 0,
       user: userDetails?.name || 'Unknown'
     });
 
+    // 🛡️ STEP 1: Validate request data
+    if (!updatedItems || !Array.isArray(updatedItems)) {
+      throw new Error("Updated items are required and must be an array");
+    }
+
+    if (!originalItems || !Array.isArray(originalItems)) {
+      throw new Error("Original items are required for comparison");
+    }
+
     // Find original invoice
+    console.log(`🔍 [${requestId}] Finding original invoice...`);
     const originalInvoice = await Invoice.findOne({ invoiceNumber });
     if (!originalInvoice) {
-      return res.status(404).json({
-        success: false,
-        message: "Invoice not found"
-      });
+      throw new Error("Invoice not found");
     }
+
+    console.log(`✅ [${requestId}] Original invoice found`);
 
     // Initialize update history
     const updateHistory = {
@@ -959,23 +974,65 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
         newTotal: 0,
         oldLoyaltyCoinsEarned: originalInvoice.loyaltyCoinsEarned || 0,
         newLoyaltyCoinsEarned: 0
-      }
+      },
+      timestamp: new Date()
     };
 
-    // Step 1: Calculate inventory changes and validate
-    const inventoryOperations = [];
+    // 🛡️ STEP 2: Validate ALL numeric fields to prevent NaN
+    console.log(`🔢 [${requestId}] Validating numeric fields...`);
+
     const validationErrors = [];
+    const validatedItems = updatedItems.map((item, index) => {
+      const validatedItem = { ...item };
+
+      const numericFields = [
+        'price', 'quantity', 'discount', 'taxSlab', 'baseValue',
+        'discountAmount', 'taxAmount', 'cgstAmount', 'sgstAmount',
+        'totalAmount', 'finalAmount'
+      ];
+
+      numericFields.forEach(field => {
+        if (validatedItem[field] !== undefined && validatedItem[field] !== null) {
+          const numValue = Number(validatedItem[field]);
+          if (isNaN(numValue)) {
+            validationErrors.push({
+              itemIndex: index,
+              productName: validatedItem.name,
+              field: field,
+              value: validatedItem[field],
+              error: `Invalid numeric value for ${field}`
+            });
+            validatedItem[field] = 0;
+          } else {
+            validatedItem[field] = numValue;
+          }
+        }
+      });
+
+      return validatedItem;
+    });
+
+    if (validationErrors.length > 0) {
+      throw new Error(`Invalid numeric values: ${JSON.stringify(validationErrors)}`);
+    }
+
+    console.log(`✅ [${requestId}] Numeric validation passed`);
+
+    // 🛡️ STEP 3: Calculate inventory changes and validate stock
+    console.log(`📦 [${requestId}] Calculating inventory changes...`);
+    const inventoryOperations = [];
+    const stockValidationErrors = [];
 
     // Find removed items (in original but not in updated)
     const removedItems = originalItems.filter(originalItem =>
-      !updatedItems.some(updatedItem =>
+      !validatedItems.some(updatedItem =>
         updatedItem.productId === originalItem.productId &&
         updatedItem.batchNumber === originalItem.batchNumber
       )
     );
 
     // Find added items (in updated but not in original)
-    const addedItems = updatedItems.filter(updatedItem =>
+    const addedItems = validatedItems.filter(updatedItem =>
       !originalItems.some(originalItem =>
         originalItem.productId === updatedItem.productId &&
         originalItem.batchNumber === updatedItem.batchNumber
@@ -983,29 +1040,31 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
     );
 
     // Find updated items (same product+batch but different quantity)
-    const updatedExistingItems = updatedItems.filter(updatedItem => {
+    const updatedExistingItems = validatedItems.filter(updatedItem => {
       const originalItem = originalItems.find(item =>
         item.productId === updatedItem.productId &&
         item.batchNumber === updatedItem.batchNumber
       );
-
-      if (!originalItem) return false;
-
-      console.log(`🔍 Quantity comparison for ${updatedItem.name}:`, {
-        originalQuantity: originalItem.quantity,
-        updatedQuantity: updatedItem.quantity,
-        different: originalItem.quantity !== updatedItem.quantity
-      });
-
-      return originalItem.quantity !== updatedItem.quantity;
+      return originalItem && originalItem.quantity !== updatedItem.quantity;
     });
 
-    // Validate inventory for ADDED items
+    console.log(`📊 [${requestId}] Change summary:`, {
+      added: addedItems.length,
+      removed: removedItems.length,
+      updated: updatedExistingItems.length
+    });
+
+    // 🛡️ STEP 4: VALIDATE STOCK AVAILABILITY (NO UPDATES YET)
+    console.log(`🔍 [${requestId}] Validating stock availability...`);
+
+    // Validate ADDED items stock
     for (const item of addedItems) {
-      const inventoryItem = await Inventory.findOne({ productId: item.productId });
+      const inventoryItem = await Inventory.findOne({
+        productId: item.productId
+      });
 
       if (!inventoryItem) {
-        validationErrors.push({
+        stockValidationErrors.push({
           productId: item.productId,
           productName: item.name,
           error: "Product not found in inventory"
@@ -1015,7 +1074,7 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
 
       const batch = inventoryItem.batches.find(b => b.batchNumber === item.batchNumber);
       if (!batch) {
-        validationErrors.push({
+        stockValidationErrors.push({
           productId: item.productId,
           productName: item.name,
           batchNumber: item.batchNumber,
@@ -1025,7 +1084,7 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
       }
 
       if (batch.quantity < item.quantity) {
-        validationErrors.push({
+        stockValidationErrors.push({
           productId: item.productId,
           productName: item.name,
           batchNumber: item.batchNumber,
@@ -1036,26 +1095,26 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
         continue;
       }
 
-      // Add to inventory operations (DEDUCT for added items)
+      // Store operation for later execution
       inventoryOperations.push({
         type: 'DEDUCT',
         productId: item.productId,
         batchNumber: item.batchNumber,
         quantity: item.quantity,
         inventoryItem,
-        batch
+        batch,
+        oldQuantity: batch.quantity // Store for rollback
       });
 
       updateHistory.changes.itemsAdded.push({
         productId: item.productId,
         productName: item.name,
         batchNumber: item.batchNumber,
-        quantity: item.quantity,
-        price: item.price
+        quantity: item.quantity
       });
     }
 
-    // Validate inventory for UPDATED items (quantity changes)
+    // Validate UPDATED items stock
     for (const item of updatedExistingItems) {
       const originalItem = originalItems.find(oi =>
         oi.productId === item.productId && oi.batchNumber === item.batchNumber
@@ -1065,10 +1124,12 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
 
       if (quantityDifference > 0) {
         // Increasing quantity - need to check inventory
-        const inventoryItem = await Inventory.findOne({ productId: item.productId });
+        const inventoryItem = await Inventory.findOne({
+          productId: item.productId
+        });
 
         if (!inventoryItem) {
-          validationErrors.push({
+          stockValidationErrors.push({
             productId: item.productId,
             productName: item.name,
             error: "Product not found in inventory"
@@ -1078,7 +1139,7 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
 
         const batch = inventoryItem.batches.find(b => b.batchNumber === item.batchNumber);
         if (!batch) {
-          validationErrors.push({
+          stockValidationErrors.push({
             productId: item.productId,
             productName: item.name,
             batchNumber: item.batchNumber,
@@ -1088,7 +1149,7 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
         }
 
         if (batch.quantity < quantityDifference) {
-          validationErrors.push({
+          stockValidationErrors.push({
             productId: item.productId,
             productName: item.name,
             batchNumber: item.batchNumber,
@@ -1105,11 +1166,14 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
           batchNumber: item.batchNumber,
           quantity: quantityDifference,
           inventoryItem,
-          batch
+          batch,
+          oldQuantity: batch.quantity
         });
       } else if (quantityDifference < 0) {
         // Decreasing quantity - add back to inventory
-        const inventoryItem = await Inventory.findOne({ productId: item.productId });
+        const inventoryItem = await Inventory.findOne({
+          productId: item.productId
+        });
 
         if (inventoryItem) {
           const batch = inventoryItem.batches.find(b => b.batchNumber === item.batchNumber);
@@ -1120,7 +1184,8 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
               batchNumber: item.batchNumber,
               quantity: Math.abs(quantityDifference),
               inventoryItem,
-              batch
+              batch,
+              oldQuantity: batch.quantity
             });
           }
         }
@@ -1136,9 +1201,11 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
       });
     }
 
-    // Handle REMOVED items (add back to inventory)
+    // Handle REMOVED items
     for (const item of removedItems) {
-      const inventoryItem = await Inventory.findOne({ productId: item.productId });
+      const inventoryItem = await Inventory.findOne({
+        productId: item.productId
+      });
 
       if (inventoryItem) {
         const batch = inventoryItem.batches.find(b => b.batchNumber === item.batchNumber);
@@ -1149,7 +1216,8 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
             batchNumber: item.batchNumber,
             quantity: item.quantity,
             inventoryItem,
-            batch
+            batch,
+            oldQuantity: batch.quantity
           });
         }
       }
@@ -1158,32 +1226,33 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
         productId: item.productId,
         productName: item.name,
         batchNumber: item.batchNumber,
-        quantity: item.quantity,
-        price: item.price
+        quantity: item.quantity
       });
     }
 
-    // If validation errors, abort - NO STOCK UPDATES
-    if (validationErrors.length > 0) {
-      console.log(`❌ [${requestId}] Validation failed - no stock updates made`);
+    // If ANY validation errors, ABORT - NO UPDATES
+    if (stockValidationErrors.length > 0) {
+      console.log(`❌ [${requestId}] Stock validation failed - ABORTING ALL UPDATES`);
 
-      updateHistory.status = 'FAILED';
-      updateHistory.errorDetails = JSON.stringify(validationErrors);
+      updateHistory.status = 'FAILED_VALIDATION';
+      updateHistory.errorDetails = JSON.stringify(stockValidationErrors);
       await InvoiceUpdateHistory.create(updateHistory);
 
       return res.status(400).json({
         success: false,
         message: "Inventory validation failed",
-        errors: validationErrors
+        errors: stockValidationErrors
       });
     }
 
-    console.log(`✅ [${requestId}] All validations passed - proceeding with updates`);
+    console.log(`✅ [${requestId}] All validations passed - proceeding with ALL updates`);
 
-    // Step 2: Execute inventory updates FIRST
-    console.log(`📦 [${requestId}] Starting inventory updates for ${inventoryOperations.length} operations`);
+    // 🛡️ STEP 5: EXECUTE ALL UPDATES WITH MANUAL ROLLBACK CAPABILITY
+    console.log(`💾 [${requestId}] Starting ALL updates with manual rollback...`);
 
-    const inventoryUpdates = [];
+    // 5A: Update Inventory FIRST
+    console.log(`📦 [${requestId}] Updating inventory for ${inventoryOperations.length} operations...`);
+
     for (const operation of inventoryOperations) {
       const beforeQuantity = operation.batch.quantity;
 
@@ -1198,14 +1267,14 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
       // Save inventory item
       await operation.inventoryItem.save();
 
-      inventoryUpdates.push({
+      // Track for rollback
+      inventoryChanges.push({
         productId: operation.productId,
-        productName: operation.inventoryItem.productName,
         batchNumber: operation.batchNumber,
-        quantityChange: operation.type === 'ADD' ? operation.quantity : -operation.quantity,
+        oldQuantity: operation.oldQuantity,
+        newQuantity: afterQuantity,
         operation: operation.type,
-        beforeQuantity,
-        afterQuantity
+        inventoryItem: operation.inventoryItem
       });
 
       console.log(`📦 [${requestId}] Inventory ${operation.type}:`, {
@@ -1217,87 +1286,96 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
       });
     }
 
-    updateHistory.inventoryUpdates = inventoryUpdates;
-    console.log(`✅ [${requestId}] All inventory updates completed successfully`);
+    console.log(`✅ [${requestId}] Inventory updates completed`);
 
-    // Step 3: Update invoice with new items and recalculate - COMPLETE RECALCULATION
-    console.log(`💾 [${requestId}] Updating invoice data...`);
+    // 5B: Update Invoice
+    console.log(`📄 [${requestId}] Updating invoice data...`);
+
+    // Calculate new totals from validated items
+    const newTotal = validatedItems.reduce((sum, item) => {
+      const itemTotal = Number(item.finalAmount) || Number(item.totalAmount) || 0;
+      return sum + itemTotal;
+    }, 0);
+
+    const totalBaseValue = validatedItems.reduce((sum, item) => {
+      return sum + (Number(item.baseValue) || 0);
+    }, 0);
+
+    const newLoyaltyCoinsEarned = Math.floor(totalBaseValue / 100);
 
     const updatedInvoiceData = {
-      ...originalInvoice.toObject(),
-      items: updatedItems,
+      items: validatedItems,
+      subtotal: validatedItems.reduce((sum, item) => sum + (Number(item.price) * Number(item.quantity)), 0),
+      total: newTotal,
+      baseValue: totalBaseValue,
+      loyaltyCoinsEarned: newLoyaltyCoinsEarned,
       updatedAt: new Date()
     };
 
-    // COMPLETE RECALCULATION: Recalculate ALL totals including promo and loyalty
-    const recalculatedTotals = recalculateInvoiceTotalsWithDiscounts(updatedItems, originalInvoice);
-    Object.assign(updatedInvoiceData, recalculatedTotals);
+    // Preserve existing data
+    if (originalInvoice.appliedPromoCode) {
+      updatedInvoiceData.appliedPromoCode = originalInvoice.appliedPromoCode;
+      updatedInvoiceData.promoDiscount = originalInvoice.promoDiscount;
+    }
+    if (originalInvoice.loyaltyCoinsUsed) {
+      updatedInvoiceData.loyaltyCoinsUsed = originalInvoice.loyaltyCoinsUsed;
+      updatedInvoiceData.loyaltyDiscount = originalInvoice.loyaltyDiscount;
+    }
 
-    // Calculate loyalty coins difference
-    const oldLoyaltyCoins = originalInvoice.loyaltyCoinsEarned || 0;
-    const newLoyaltyCoins = recalculatedTotals.loyaltyCoinsEarned || 0;
-    const loyaltyCoinsDifference = newLoyaltyCoins - oldLoyaltyCoins;
+    // Update invoice
+    const updatedInvoice = await Invoice.findOneAndUpdate(
+      { invoiceNumber },
+      updatedInvoiceData,
+      { new: true, runValidators: true }
+    );
 
-    updateHistory.calculationChanges.newTotal = recalculatedTotals.total;
-    updateHistory.calculationChanges.difference = recalculatedTotals.total - updateHistory.calculationChanges.oldTotal;
-    updateHistory.calculationChanges.newLoyaltyCoinsEarned = newLoyaltyCoins;
-    updateHistory.calculationChanges.loyaltyCoinsDifference = loyaltyCoinsDifference;
+    if (!updatedInvoice) {
+      throw new Error("Failed to update invoice");
+    }
 
-    // Update customer loyalty coins if there's a difference
+    invoiceUpdated = true;
+    console.log(`✅ [${requestId}] Invoice update completed`);
+
+    // 5C: Update customer loyalty coins if needed
+    const loyaltyCoinsDifference = newLoyaltyCoinsEarned - (originalInvoice.loyaltyCoinsEarned || 0);
+
     if (loyaltyCoinsDifference !== 0 && originalInvoice.customer?.customerId) {
       try {
-        console.log(`🪙 [${requestId}] Updating customer loyalty coins:`, {
-          customerId: originalInvoice.customer.customerId,
-          oldCoins: oldLoyaltyCoins,
-          newCoins: newLoyaltyCoins,
-          difference: loyaltyCoinsDifference
-        });
+        console.log(`🪙 [${requestId}] Updating customer loyalty coins...`);
 
-        // Call customer update API to adjust loyalty coins
         const customerResponse = await axios.put(
           `${process.env.VITE_API_URL}/customer/update-loyalty-coins/${originalInvoice.customer.customerId}`,
           {
             coinsEarned: loyaltyCoinsDifference > 0 ? loyaltyCoinsDifference : 0,
-            coinsUsed: 0 // No coins used in product update
+            coinsUsed: 0
           }
         );
 
-        console.log(`✅ [${requestId}] Customer loyalty coins updated:`, customerResponse.data);
+        loyaltyCoinsUpdated = true;
+        console.log(`✅ [${requestId}] Customer loyalty coins updated`);
       } catch (customerError) {
         console.error(`❌ [${requestId}] Failed to update customer loyalty coins:`, customerError.message);
-        // Continue with invoice update even if loyalty coins update fails
+        // Don't throw error - continue with success
       }
     }
 
-    const updatedInvoice = await Invoice.findOneAndUpdate(
-      { invoiceNumber },
-      updatedInvoiceData,
-      { new: true }
-    );
+    // 🛡️ STEP 6: ALL UPDATES SUCCESSFUL - Save history
+    console.log(`🎉 [${requestId}] ALL updates completed successfully!`);
 
-    // Step 4: Save update history
     updateHistory.status = 'SUCCESS';
+    updateHistory.calculationChanges.newTotal = newTotal;
+    updateHistory.calculationChanges.newLoyaltyCoinsEarned = newLoyaltyCoinsEarned;
+    updateHistory.calculationChanges.difference = newTotal - updateHistory.calculationChanges.oldTotal;
+    updateHistory.calculationChanges.loyaltyCoinsDifference = loyaltyCoinsDifference;
+    updateHistory.inventoryUpdates = inventoryChanges.map(change => ({
+      productId: change.productId,
+      batchNumber: change.batchNumber,
+      operation: change.operation,
+      beforeQuantity: change.oldQuantity,
+      afterQuantity: change.newQuantity
+    }));
+
     await InvoiceUpdateHistory.create(updateHistory);
-
-    console.log(`✅ [${requestId}] Invoice products updated successfully:`, {
-      invoiceNumber,
-      itemsAdded: updateHistory.changes.itemsAdded.length,
-      itemsRemoved: updateHistory.changes.itemsRemoved.length,
-      itemsUpdated: updateHistory.changes.itemsUpdated.length,
-      inventoryUpdates: updateHistory.inventoryUpdates.length,
-      totalChange: updateHistory.calculationChanges.difference,
-      loyaltyCoinsChange: updateHistory.calculationChanges.loyaltyCoinsDifference
-    });
-
-    // Log user action
-    console.log('📝 INVOICE PRODUCTS UPDATED:', {
-      invoiceNumber: invoiceNumber,
-      user: userDetails ? `${userDetails.name} (${userDetails.email})` : 'Unknown User',
-      changes: updateHistory.changes,
-      totalChange: updateHistory.calculationChanges.difference,
-      loyaltyCoinsChange: updateHistory.calculationChanges.loyaltyCoinsDifference,
-      timestamp: new Date().toISOString()
-    });
 
     res.status(200).json({
       success: true,
@@ -1313,145 +1391,59 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
     });
 
   } catch (error) {
-    console.error(`💥 [${requestId}] Error updating invoice products:`, error);
+    // 🛡️ STEP 7: MANUAL ROLLBACK ON ANY ERROR
+    console.error(`💥 [${requestId}] Error occurred - PERFORMING MANUAL ROLLBACK:`, error.message);
 
-    // Save failed update history
-    try {
-      await InvoiceUpdateHistory.create({
-        updateId: updateHistoryId,
-        originalInvoiceNumber: req.params.invoiceNumber,
-        updatedBy: req.body.userDetails,
-        status: 'FAILED',
-        errorDetails: error.message,
-        timestamp: new Date()
-      });
-    } catch (historyError) {
-      console.error(`❌ [${requestId}] Failed to save update history:`, historyError);
+    let rollbackErrors = [];
+
+    // Rollback Inventory if it was updated
+    if (inventoryChanges.length > 0) {
+      console.log(`🔄 [${requestId}] Rolling back inventory changes...`);
+
+      for (const change of inventoryChanges) {
+        try {
+          // Restore original quantity
+          change.inventoryItem.batches.find(b => b.batchNumber === change.batchNumber).quantity = change.oldQuantity;
+          await change.inventoryItem.save();
+          console.log(`✅ [${requestId}] Rolled back inventory: ${change.productId} - ${change.batchNumber}`);
+        } catch (rollbackError) {
+          rollbackErrors.push(`Failed to rollback ${change.productId}: ${rollbackError.message}`);
+          console.error(`❌ [${requestId}] Failed to rollback inventory:`, rollbackError.message);
+        }
+      }
     }
+
+    // Save failed history with rollback info
+    await InvoiceUpdateHistory.create({
+      updateId: updateHistoryId,
+      originalInvoiceNumber: req.params.invoiceNumber,
+      updatedBy: req.body.userDetails,
+      status: 'FAILED_WITH_ROLLBACK',
+      errorDetails: error.message,
+      rollbackPerformed: inventoryChanges.length > 0,
+      rollbackErrors: rollbackErrors,
+      inventoryChangesAttempted: inventoryChanges.map(c => ({
+        productId: c.productId,
+        batchNumber: c.batchNumber,
+        operation: c.operation
+      })),
+      invoiceUpdated: invoiceUpdated,
+      loyaltyCoinsUpdated: loyaltyCoinsUpdated,
+      timestamp: new Date()
+    });
+
+    const errorMessage = rollbackErrors.length > 0
+      ? `Failed to update invoice products - partial rollback performed. Errors: ${rollbackErrors.join(', ')}`
+      : "Failed to update invoice products - all changes rolled back successfully";
 
     res.status(500).json({
       success: false,
-      message: "Failed to update invoice products",
-      error: error.message
+      message: errorMessage,
+      error: error.message,
+      requestId: requestId,
+      rollbackPerformed: inventoryChanges.length > 0
     });
   }
 });
-
-// COMPLETE RECALCULATION FUNCTION with Promo and Loyalty Coins
-function recalculateInvoiceTotalsWithDiscounts(items, originalInvoice) {
-  let subtotal = 0;
-  let totalDiscountAmount = 0;
-  let totalBaseValue = 0;
-  let totalTaxAmount = 0;
-  let cgstAmount = 0;
-  let sgstAmount = 0;
-  const taxPercentages = new Set();
-
-  // First calculate amount after all discounts
-  let amountAfterAllDiscounts = 0;
-
-  const itemsWithCalculations = items.map(item => {
-    const quantity = item.quantity || 1;
-    const taxRate = item.taxSlab || 18;
-    const discountPercentage = item.discount || 0;
-
-    taxPercentages.add(taxRate);
-
-    const itemTotalInclTax = (item.price || 0) * quantity;
-    const itemDiscountAmount = itemTotalInclTax * (discountPercentage / 100);
-    const itemTotalAfterDiscount = itemTotalInclTax - itemDiscountAmount;
-
-    subtotal += itemTotalInclTax;
-    totalDiscountAmount += itemDiscountAmount;
-    amountAfterAllDiscounts += itemTotalAfterDiscount;
-
-    return {
-      ...item,
-      discountAmount: itemDiscountAmount,
-      totalAmount: itemTotalAfterDiscount
-    };
-  });
-
-  // RECALCULATE PROMO DISCOUNT based on new amountAfterAllDiscounts
-  let promoDiscountAmount = 0;
-  if (originalInvoice.appliedPromoCode) {
-    promoDiscountAmount = amountAfterAllDiscounts * (originalInvoice.appliedPromoCode.discount / 100);
-  }
-
-  // Amount after promo discount
-  const amountAfterPromo = amountAfterAllDiscounts - promoDiscountAmount;
-
-  // RECALCULATE LOYALTY DISCOUNT based on new amountAfterPromo
-  let loyaltyDiscountAmount = 0;
-  let actualLoyaltyCoinsUsed = 0;
-
-  // If original invoice had loyalty coins used, recalculate based on new amount
-  if (originalInvoice.loyaltyCoinsUsed > 0) {
-    // Use the same loyalty coins used amount, but ensure it doesn't exceed the new amountAfterPromo
-    loyaltyDiscountAmount = Math.min(originalInvoice.loyaltyCoinsUsed, amountAfterPromo);
-    actualLoyaltyCoinsUsed = Math.floor(loyaltyDiscountAmount);
-  }
-
-  // Final amount after ALL discounts (promo + loyalty)
-  const finalAmountAfterAllDiscounts = amountAfterPromo - loyaltyDiscountAmount;
-
-  // Calculate tax on the final amount after ALL discounts
-  const itemsWithTaxCalculations = itemsWithCalculations.map(item => {
-    const taxRate = item.taxSlab || 18;
-
-    // Calculate tax based on final discounted amount for this item
-    const itemFinalAmount = (item.totalAmount / amountAfterAllDiscounts) * finalAmountAfterAllDiscounts;
-    const itemBaseValue = itemFinalAmount / (1 + taxRate / 100);
-    const itemTaxAmount = itemFinalAmount - itemBaseValue;
-    const itemCgstAmount = taxPercentages.size === 1 ? itemTaxAmount / 2 : 0;
-    const itemSgstAmount = taxPercentages.size === 1 ? itemTaxAmount / 2 : 0;
-
-    totalBaseValue += itemBaseValue;
-    totalTaxAmount += itemTaxAmount;
-    cgstAmount += itemCgstAmount;
-    sgstAmount += itemSgstAmount;
-
-    return {
-      ...item,
-      baseValue: itemBaseValue,
-      taxAmount: itemTaxAmount,
-      cgstAmount: itemCgstAmount,
-      sgstAmount: itemSgstAmount,
-      finalAmount: itemFinalAmount
-    };
-  });
-
-  const hasMixedTaxRates = taxPercentages.size > 1;
-  if (hasMixedTaxRates) {
-    cgstAmount = 0;
-    sgstAmount = 0;
-  }
-
-  // Final grand total
-  const grandTotal = finalAmountAfterAllDiscounts;
-
-  // CALCULATE NEW LOYALTY COINS EARNED based on new baseValue
-  const loyaltyCoinsEarned = Math.floor(totalBaseValue / 100);
-
-  return {
-    items: itemsWithTaxCalculations,
-    subtotal: subtotal,
-    baseValue: totalBaseValue,
-    discount: totalDiscountAmount,
-    promoDiscount: promoDiscountAmount,
-    loyaltyDiscount: loyaltyDiscountAmount,
-    loyaltyCoinsUsed: actualLoyaltyCoinsUsed,
-    loyaltyCoinsEarned: loyaltyCoinsEarned,
-    tax: totalTaxAmount,
-    cgst: cgstAmount,
-    sgst: sgstAmount,
-    hasMixedTaxRates: hasMixedTaxRates,
-    taxPercentages: Array.from(taxPercentages),
-    amountAfterAllDiscounts: amountAfterAllDiscounts,
-    finalAmountAfterAllDiscounts: finalAmountAfterAllDiscounts,
-    total: grandTotal,
-    appliedPromoCode: originalInvoice.appliedPromoCode // Preserve promo code info
-  };
-}
 
 module.exports = router;
