@@ -916,7 +916,7 @@ router.post("/bulk-import-invoices", async (req, res) => {
 });
 
 
-// Update invoice products with PROPER RECALCULATION
+// Update invoice products with PROPER RECALCULATION - FIXED VERSION
 router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
   const requestId = `UPDATE_PROD_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
@@ -988,10 +988,19 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
 
     // 🛡️ STEP 3: RECALCULATE PROMO DISCOUNT (CRITICAL FIX)
     let newPromoDiscount = 0;
-    if (originalInvoice.appliedPromoCode) {
-      // Apply promo discount to amount AFTER item discounts
-      newPromoDiscount = amountAfterItemDiscounts * (originalInvoice.appliedPromoCode.discount / 100);
-      console.log(`🎫 [${requestId}] Recalculated promo discount: ${newPromoDiscount} (${originalInvoice.appliedPromoCode.discount}% of ${amountAfterItemDiscounts})`);
+    if (originalInvoice.appliedPromoCode && originalInvoice.appliedPromoCode.discount) {
+      // ✅ FIXED: Add proper validation for discount value
+      const promoDiscountPercent = Number(originalInvoice.appliedPromoCode.discount) || 0;
+
+      if (promoDiscountPercent > 0) {
+        // Apply promo discount to amount AFTER item discounts
+        newPromoDiscount = amountAfterItemDiscounts * (promoDiscountPercent / 100);
+        console.log(`🎫 [${requestId}] Recalculated promo discount: ${newPromoDiscount} (${promoDiscountPercent}% of ${amountAfterItemDiscounts})`);
+      } else {
+        console.log(`ℹ️ [${requestId}] Promo code exists but discount is 0 or invalid:`, originalInvoice.appliedPromoCode);
+      }
+    } else {
+      console.log(`ℹ️ [${requestId}] No valid promo code applied or discount is missing`);
     }
 
     // Amount after promo discount
@@ -1002,6 +1011,8 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
     if (originalInvoice.loyaltyCoinsUsed && originalInvoice.loyaltyCoinsUsed > 0) {
       newLoyaltyDiscount = Math.min(originalInvoice.loyaltyCoinsUsed, amountAfterPromo);
       console.log(`🪙 [${requestId}] Recalculated loyalty discount: ${newLoyaltyDiscount} (coins used: ${originalInvoice.loyaltyCoinsUsed})`);
+    } else {
+      console.log(`ℹ️ [${requestId}] No loyalty coins used`);
     }
 
     // 🛡️ STEP 5: CALCULATE FINAL GRAND TOTAL (THE MOST IMPORTANT PART)
