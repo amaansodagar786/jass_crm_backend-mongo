@@ -1303,23 +1303,48 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
 
     const newLoyaltyCoinsEarned = Math.floor(totalBaseValue / 100);
 
+    // ✅ FIXED CODE (in backend):
+
+    // FIRST: Calculate amount after item discounts
+    const amountAfterItemDiscounts = validatedItems.reduce((sum, item) => {
+      const itemTotal = (item.price || 0) * (item.quantity || 1);
+      const itemDiscount = itemTotal * ((item.discount || 0) / 100);
+      return sum + (itemTotal - itemDiscount);
+    }, 0);
+
+    // SECOND: Recalculate promo discount based on NEW items
+    let newPromoDiscount = 0;
+    if (originalInvoice.appliedPromoCode) {
+      newPromoDiscount = amountAfterItemDiscounts * (originalInvoice.appliedPromoCode.discount / 100);
+    }
+
+    // THIRD: Recalculate loyalty discount based on NEW amount after promo
+    const amountAfterPromo = amountAfterItemDiscounts - newPromoDiscount;
+    let newLoyaltyDiscount = 0;
+    if (originalInvoice.loyaltyCoinsUsed && originalInvoice.loyaltyCoinsUsed > 0) {
+      newLoyaltyDiscount = Math.min(originalInvoice.loyaltyCoinsUsed, amountAfterPromo);
+    }
+
+    // FINALLY: Create updated data with RECALCULATED values
     const updatedInvoiceData = {
       items: validatedItems,
       subtotal: validatedItems.reduce((sum, item) => sum + (Number(item.price) * Number(item.quantity)), 0),
       total: newTotal,
       baseValue: totalBaseValue,
+      discount: validatedItems.reduce((sum, item) => sum + (Number(item.discountAmount) || 0), 0),
       loyaltyCoinsEarned: newLoyaltyCoinsEarned,
+      // ✅ USE RECALCULATED DISCOUNTS:
+      promoDiscount: newPromoDiscount,
+      loyaltyDiscount: newLoyaltyDiscount,
       updatedAt: new Date()
     };
 
-    // Preserve existing data
+    // Only preserve the CODE info, NOT the calculated amounts
     if (originalInvoice.appliedPromoCode) {
       updatedInvoiceData.appliedPromoCode = originalInvoice.appliedPromoCode;
-      updatedInvoiceData.promoDiscount = originalInvoice.promoDiscount;
     }
     if (originalInvoice.loyaltyCoinsUsed) {
       updatedInvoiceData.loyaltyCoinsUsed = originalInvoice.loyaltyCoinsUsed;
-      updatedInvoiceData.loyaltyDiscount = originalInvoice.loyaltyDiscount;
     }
 
     // Update invoice
