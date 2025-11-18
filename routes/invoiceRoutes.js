@@ -916,430 +916,131 @@ router.post("/bulk-import-invoices", async (req, res) => {
 });
 
 
-// Update invoice products with inventory synchronization - COMPLETE FIXED VERSION
-// Update invoice products with inventory synchronization - MANUAL ALL OR NOTHING
+// Update invoice products with PROPER RECALCULATION
 router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
   const requestId = `UPDATE_PROD_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  const updateHistoryId = `INV_UPDATE_${Date.now()}`;
-
-  // Track changes for manual rollback
-  let inventoryChanges = []; // { productId, batchNumber, oldQuantity, newQuantity, operation }
-  let invoiceUpdated = false;
-  let loyaltyCoinsUpdated = false;
 
   try {
     const { invoiceNumber } = req.params;
     const { updatedItems, originalItems, userDetails } = req.body;
 
-    console.log(`🔄 [${requestId}] Starting invoice products update (MANUAL ALL OR NOTHING)`);
-    console.log(`📥 [${requestId}] Update details:`, {
-      invoiceNumber,
-      originalItemsCount: originalItems?.length || 0,
-      updatedItemsCount: updatedItems?.length || 0,
-      user: userDetails?.name || 'Unknown'
-    });
+    console.log(`🔄 [${requestId}] Starting invoice products update with PROPER RECALCULATION`);
 
     // 🛡️ STEP 1: Validate request data
     if (!updatedItems || !Array.isArray(updatedItems)) {
       throw new Error("Updated items are required and must be an array");
     }
 
-    if (!originalItems || !Array.isArray(originalItems)) {
-      throw new Error("Original items are required for comparison");
-    }
-
     // Find original invoice
-    console.log(`🔍 [${requestId}] Finding original invoice...`);
     const originalInvoice = await Invoice.findOne({ invoiceNumber });
     if (!originalInvoice) {
       throw new Error("Invoice not found");
     }
 
-    console.log(`✅ [${requestId}] Original invoice found`);
+    console.log(`✅ [${requestId}] Original invoice found with total: ${originalInvoice.total}`);
 
-    // Initialize update history
-    const updateHistory = {
-      updateId: updateHistoryId,
-      originalInvoiceNumber: invoiceNumber,
-      updatedBy: userDetails,
-      changes: {
-        itemsAdded: [],
-        itemsRemoved: [],
-        itemsUpdated: [],
-        productsChanged: []
-      },
-      inventoryUpdates: [],
-      calculationChanges: {
-        oldTotal: originalInvoice.total,
-        newTotal: 0,
-        oldLoyaltyCoinsEarned: originalInvoice.loyaltyCoinsEarned || 0,
-        newLoyaltyCoinsEarned: 0
-      },
-      timestamp: new Date()
-    };
+    // 🛡️ STEP 2: PROPERLY RECALCULATE ALL TOTALS FROM SCRATCH
+    console.log(`🧮 [${requestId}] Recalculating ALL invoice totals from scratch...`);
 
-    // 🛡️ STEP 2: Validate ALL numeric fields to prevent NaN
-    console.log(`🔢 [${requestId}] Validating numeric fields...`);
+    let newSubtotal = 0;
+    let newTotalDiscount = 0;
+    let amountAfterItemDiscounts = 0;
 
-    const validationErrors = [];
-    const validatedItems = updatedItems.map((item, index) => {
-      const validatedItem = { ...item };
+    // Calculate item-level totals
+    const recalculatedItems = updatedItems.map(item => {
+      const quantity = item.quantity || 1;
+      const price = item.price || 0;
+      const discountPercent = item.discount || 0;
+      const taxRate = item.taxSlab || 18;
 
-      const numericFields = [
-        'price', 'quantity', 'discount', 'taxSlab', 'baseValue',
-        'discountAmount', 'taxAmount', 'cgstAmount', 'sgstAmount',
-        'totalAmount', 'finalAmount'
-      ];
+      // Calculate item totals
+      const itemTotalBeforeDiscount = price * quantity;
+      const itemDiscountAmount = itemTotalBeforeDiscount * (discountPercent / 100);
+      const itemTotalAfterDiscount = itemTotalBeforeDiscount - itemDiscountAmount;
 
-      numericFields.forEach(field => {
-        if (validatedItem[field] !== undefined && validatedItem[field] !== null) {
-          const numValue = Number(validatedItem[field]);
-          if (isNaN(numValue)) {
-            validationErrors.push({
-              itemIndex: index,
-              productName: validatedItem.name,
-              field: field,
-              value: validatedItem[field],
-              error: `Invalid numeric value for ${field}`
-            });
-            validatedItem[field] = 0;
-          } else {
-            validatedItem[field] = numValue;
-          }
-        }
-      });
+      newSubtotal += itemTotalBeforeDiscount;
+      newTotalDiscount += itemDiscountAmount;
+      amountAfterItemDiscounts += itemTotalAfterDiscount;
 
-      return validatedItem;
+      // Calculate tax components
+      const baseValue = itemTotalAfterDiscount / (1 + taxRate / 100);
+      const taxAmount = itemTotalAfterDiscount - baseValue;
+      const cgstAmount = taxAmount / 2;
+      const sgstAmount = taxAmount / 2;
+
+      return {
+        ...item,
+        baseValue: parseFloat(baseValue.toFixed(2)),
+        discountAmount: parseFloat(itemDiscountAmount.toFixed(2)),
+        taxAmount: parseFloat(taxAmount.toFixed(2)),
+        cgstAmount: parseFloat(cgstAmount.toFixed(2)),
+        sgstAmount: parseFloat(sgstAmount.toFixed(2)),
+        totalAmount: parseFloat(itemTotalAfterDiscount.toFixed(2)),
+        finalAmount: parseFloat(itemTotalAfterDiscount.toFixed(2))
+      };
     });
 
-    if (validationErrors.length > 0) {
-      throw new Error(`Invalid numeric values: ${JSON.stringify(validationErrors)}`);
-    }
-
-    console.log(`✅ [${requestId}] Numeric validation passed`);
-
-    // 🛡️ STEP 3: Calculate inventory changes and validate stock
-    console.log(`📦 [${requestId}] Calculating inventory changes...`);
-    const inventoryOperations = [];
-    const stockValidationErrors = [];
-
-    // Find removed items (in original but not in updated)
-    const removedItems = originalItems.filter(originalItem =>
-      !validatedItems.some(updatedItem =>
-        updatedItem.productId === originalItem.productId &&
-        updatedItem.batchNumber === originalItem.batchNumber
-      )
-    );
-
-    // Find added items (in updated but not in original)
-    const addedItems = validatedItems.filter(updatedItem =>
-      !originalItems.some(originalItem =>
-        originalItem.productId === updatedItem.productId &&
-        originalItem.batchNumber === updatedItem.batchNumber
-      )
-    );
-
-    // Find updated items (same product+batch but different quantity)
-    const updatedExistingItems = validatedItems.filter(updatedItem => {
-      const originalItem = originalItems.find(item =>
-        item.productId === updatedItem.productId &&
-        item.batchNumber === updatedItem.batchNumber
-      );
-      return originalItem && originalItem.quantity !== updatedItem.quantity;
+    console.log(`📊 [${requestId}] Basic calculations:`, {
+      newSubtotal,
+      newTotalDiscount,
+      amountAfterItemDiscounts
     });
 
-    console.log(`📊 [${requestId}] Change summary:`, {
-      added: addedItems.length,
-      removed: removedItems.length,
-      updated: updatedExistingItems.length
-    });
-
-    // 🛡️ STEP 4: VALIDATE STOCK AVAILABILITY (NO UPDATES YET)
-    console.log(`🔍 [${requestId}] Validating stock availability...`);
-
-    // Validate ADDED items stock
-    for (const item of addedItems) {
-      const inventoryItem = await Inventory.findOne({
-        productId: item.productId
-      });
-
-      if (!inventoryItem) {
-        stockValidationErrors.push({
-          productId: item.productId,
-          productName: item.name,
-          error: "Product not found in inventory"
-        });
-        continue;
-      }
-
-      const batch = inventoryItem.batches.find(b => b.batchNumber === item.batchNumber);
-      if (!batch) {
-        stockValidationErrors.push({
-          productId: item.productId,
-          productName: item.name,
-          batchNumber: item.batchNumber,
-          error: "Batch not found"
-        });
-        continue;
-      }
-
-      if (batch.quantity < item.quantity) {
-        stockValidationErrors.push({
-          productId: item.productId,
-          productName: item.name,
-          batchNumber: item.batchNumber,
-          error: "Insufficient quantity",
-          available: batch.quantity,
-          requested: item.quantity
-        });
-        continue;
-      }
-
-      // Store operation for later execution
-      inventoryOperations.push({
-        type: 'DEDUCT',
-        productId: item.productId,
-        batchNumber: item.batchNumber,
-        quantity: item.quantity,
-        inventoryItem,
-        batch,
-        oldQuantity: batch.quantity // Store for rollback
-      });
-
-      updateHistory.changes.itemsAdded.push({
-        productId: item.productId,
-        productName: item.name,
-        batchNumber: item.batchNumber,
-        quantity: item.quantity
-      });
-    }
-
-    // Validate UPDATED items stock
-    for (const item of updatedExistingItems) {
-      const originalItem = originalItems.find(oi =>
-        oi.productId === item.productId && oi.batchNumber === item.batchNumber
-      );
-
-      const quantityDifference = item.quantity - originalItem.quantity;
-
-      if (quantityDifference > 0) {
-        // Increasing quantity - need to check inventory
-        const inventoryItem = await Inventory.findOne({
-          productId: item.productId
-        });
-
-        if (!inventoryItem) {
-          stockValidationErrors.push({
-            productId: item.productId,
-            productName: item.name,
-            error: "Product not found in inventory"
-          });
-          continue;
-        }
-
-        const batch = inventoryItem.batches.find(b => b.batchNumber === item.batchNumber);
-        if (!batch) {
-          stockValidationErrors.push({
-            productId: item.productId,
-            productName: item.name,
-            batchNumber: item.batchNumber,
-            error: "Batch not found"
-          });
-          continue;
-        }
-
-        if (batch.quantity < quantityDifference) {
-          stockValidationErrors.push({
-            productId: item.productId,
-            productName: item.name,
-            batchNumber: item.batchNumber,
-            error: "Insufficient quantity for increase",
-            available: batch.quantity,
-            needed: quantityDifference
-          });
-          continue;
-        }
-
-        inventoryOperations.push({
-          type: 'DEDUCT',
-          productId: item.productId,
-          batchNumber: item.batchNumber,
-          quantity: quantityDifference,
-          inventoryItem,
-          batch,
-          oldQuantity: batch.quantity
-        });
-      } else if (quantityDifference < 0) {
-        // Decreasing quantity - add back to inventory
-        const inventoryItem = await Inventory.findOne({
-          productId: item.productId
-        });
-
-        if (inventoryItem) {
-          const batch = inventoryItem.batches.find(b => b.batchNumber === item.batchNumber);
-          if (batch) {
-            inventoryOperations.push({
-              type: 'ADD',
-              productId: item.productId,
-              batchNumber: item.batchNumber,
-              quantity: Math.abs(quantityDifference),
-              inventoryItem,
-              batch,
-              oldQuantity: batch.quantity
-            });
-          }
-        }
-      }
-
-      updateHistory.changes.itemsUpdated.push({
-        productId: item.productId,
-        productName: item.name,
-        batchNumber: item.batchNumber,
-        oldQuantity: originalItem.quantity,
-        newQuantity: item.quantity,
-        quantityDifference: quantityDifference
-      });
-    }
-
-    // Handle REMOVED items
-    for (const item of removedItems) {
-      const inventoryItem = await Inventory.findOne({
-        productId: item.productId
-      });
-
-      if (inventoryItem) {
-        const batch = inventoryItem.batches.find(b => b.batchNumber === item.batchNumber);
-        if (batch) {
-          inventoryOperations.push({
-            type: 'ADD',
-            productId: item.productId,
-            batchNumber: item.batchNumber,
-            quantity: item.quantity,
-            inventoryItem,
-            batch,
-            oldQuantity: batch.quantity
-          });
-        }
-      }
-
-      updateHistory.changes.itemsRemoved.push({
-        productId: item.productId,
-        productName: item.name,
-        batchNumber: item.batchNumber,
-        quantity: item.quantity
-      });
-    }
-
-    // If ANY validation errors, ABORT - NO UPDATES
-    if (stockValidationErrors.length > 0) {
-      console.log(`❌ [${requestId}] Stock validation failed - ABORTING ALL UPDATES`);
-
-      updateHistory.status = 'FAILED_VALIDATION';
-      updateHistory.errorDetails = JSON.stringify(stockValidationErrors);
-      await InvoiceUpdateHistory.create(updateHistory);
-
-      return res.status(400).json({
-        success: false,
-        message: "Inventory validation failed",
-        errors: stockValidationErrors
-      });
-    }
-
-    console.log(`✅ [${requestId}] All validations passed - proceeding with ALL updates`);
-
-    // 🛡️ STEP 5: EXECUTE ALL UPDATES WITH MANUAL ROLLBACK CAPABILITY
-    console.log(`💾 [${requestId}] Starting ALL updates with manual rollback...`);
-
-    // 5A: Update Inventory FIRST
-    console.log(`📦 [${requestId}] Updating inventory for ${inventoryOperations.length} operations...`);
-
-    for (const operation of inventoryOperations) {
-      const beforeQuantity = operation.batch.quantity;
-
-      if (operation.type === 'ADD') {
-        operation.batch.quantity += operation.quantity;
-      } else if (operation.type === 'DEDUCT') {
-        operation.batch.quantity -= operation.quantity;
-      }
-
-      const afterQuantity = operation.batch.quantity;
-
-      // Save inventory item
-      await operation.inventoryItem.save();
-
-      // Track for rollback
-      inventoryChanges.push({
-        productId: operation.productId,
-        batchNumber: operation.batchNumber,
-        oldQuantity: operation.oldQuantity,
-        newQuantity: afterQuantity,
-        operation: operation.type,
-        inventoryItem: operation.inventoryItem
-      });
-
-      console.log(`📦 [${requestId}] Inventory ${operation.type}:`, {
-        product: operation.inventoryItem.productName,
-        batch: operation.batchNumber,
-        change: operation.quantity,
-        before: beforeQuantity,
-        after: afterQuantity
-      });
-    }
-
-    console.log(`✅ [${requestId}] Inventory updates completed`);
-
-    // 5B: Update Invoice
-    console.log(`📄 [${requestId}] Updating invoice data...`);
-
-    // Calculate new totals from validated items
-    const newTotal = validatedItems.reduce((sum, item) => {
-      const itemTotal = Number(item.finalAmount) || Number(item.totalAmount) || 0;
-      return sum + itemTotal;
-    }, 0);
-
-    const totalBaseValue = validatedItems.reduce((sum, item) => {
-      return sum + (Number(item.baseValue) || 0);
-    }, 0);
-
-    const newLoyaltyCoinsEarned = Math.floor(totalBaseValue / 100);
-
-    // ✅ FIXED CODE (in backend):
-
-    // FIRST: Calculate amount after item discounts
-    const amountAfterItemDiscounts = validatedItems.reduce((sum, item) => {
-      const itemTotal = (item.price || 0) * (item.quantity || 1);
-      const itemDiscount = itemTotal * ((item.discount || 0) / 100);
-      return sum + (itemTotal - itemDiscount);
-    }, 0);
-
-    // SECOND: Recalculate promo discount based on NEW items
+    // 🛡️ STEP 3: RECALCULATE PROMO DISCOUNT (CRITICAL FIX)
     let newPromoDiscount = 0;
     if (originalInvoice.appliedPromoCode) {
+      // Apply promo discount to amount AFTER item discounts
       newPromoDiscount = amountAfterItemDiscounts * (originalInvoice.appliedPromoCode.discount / 100);
+      console.log(`🎫 [${requestId}] Recalculated promo discount: ${newPromoDiscount} (${originalInvoice.appliedPromoCode.discount}% of ${amountAfterItemDiscounts})`);
     }
 
-    // THIRD: Recalculate loyalty discount based on NEW amount after promo
+    // Amount after promo discount
     const amountAfterPromo = amountAfterItemDiscounts - newPromoDiscount;
+
+    // 🛡️ STEP 4: RECALCULATE LOYALTY DISCOUNT (CRITICAL FIX)
     let newLoyaltyDiscount = 0;
     if (originalInvoice.loyaltyCoinsUsed && originalInvoice.loyaltyCoinsUsed > 0) {
       newLoyaltyDiscount = Math.min(originalInvoice.loyaltyCoinsUsed, amountAfterPromo);
+      console.log(`🪙 [${requestId}] Recalculated loyalty discount: ${newLoyaltyDiscount} (coins used: ${originalInvoice.loyaltyCoinsUsed})`);
     }
 
-    // FINALLY: Create updated data with RECALCULATED values
-    const updatedInvoiceData = {
-      items: validatedItems,
-      subtotal: validatedItems.reduce((sum, item) => sum + (Number(item.price) * Number(item.quantity)), 0),
-      total: newTotal,
-      baseValue: totalBaseValue,
-      discount: validatedItems.reduce((sum, item) => sum + (Number(item.discountAmount) || 0), 0),
-      loyaltyCoinsEarned: newLoyaltyCoinsEarned,
-      // ✅ USE RECALCULATED DISCOUNTS:
+    // 🛡️ STEP 5: CALCULATE FINAL GRAND TOTAL (THE MOST IMPORTANT PART)
+    const newGrandTotal = amountAfterPromo - newLoyaltyDiscount;
+
+    console.log(`💰 [${requestId}] FINAL CALCULATION BREAKDOWN:`, {
+      subtotal: newSubtotal,
+      itemDiscount: newTotalDiscount,
+      amountAfterItemDiscounts: amountAfterItemDiscounts,
       promoDiscount: newPromoDiscount,
+      amountAfterPromo: amountAfterPromo,
       loyaltyDiscount: newLoyaltyDiscount,
+      FINAL_GRAND_TOTAL: newGrandTotal,
+      OLD_TOTAL: originalInvoice.total
+    });
+
+    // 🛡️ STEP 6: Calculate base value and loyalty coins
+    const newBaseValue = recalculatedItems.reduce((sum, item) => sum + (item.baseValue || 0), 0);
+    const newLoyaltyCoinsEarned = Math.floor(newBaseValue / 100);
+
+    console.log(`📈 [${requestId}] Additional calculations:`, {
+      newBaseValue,
+      newLoyaltyCoinsEarned
+    });
+
+    // 🛡️ STEP 7: Create COMPLETE updated invoice data
+    const updatedInvoiceData = {
+      items: recalculatedItems,
+      subtotal: parseFloat(newSubtotal.toFixed(2)),
+      baseValue: parseFloat(newBaseValue.toFixed(2)),
+      discount: parseFloat(newTotalDiscount.toFixed(2)),
+      promoDiscount: parseFloat(newPromoDiscount.toFixed(2)),
+      loyaltyDiscount: parseFloat(newLoyaltyDiscount.toFixed(2)),
+      total: parseFloat(newGrandTotal.toFixed(2)), // ✅ THIS IS THE CRITICAL FIX
+      loyaltyCoinsEarned: newLoyaltyCoinsEarned,
       updatedAt: new Date()
     };
 
-    // Only preserve the CODE info, NOT the calculated amounts
+    // Preserve original promo and loyalty data (just the codes/amounts, not calculated values)
     if (originalInvoice.appliedPromoCode) {
       updatedInvoiceData.appliedPromoCode = originalInvoice.appliedPromoCode;
     }
@@ -1347,7 +1048,13 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
       updatedInvoiceData.loyaltyCoinsUsed = originalInvoice.loyaltyCoinsUsed;
     }
 
-    // Update invoice
+    console.log(`💾 [${requestId}] Final update data:`, {
+      oldTotal: originalInvoice.total,
+      newTotal: updatedInvoiceData.total,
+      difference: originalInvoice.total - updatedInvoiceData.total
+    });
+
+    // 🛡️ STEP 8: Update the invoice
     const updatedInvoice = await Invoice.findOneAndUpdate(
       { invoiceNumber },
       updatedInvoiceData,
@@ -1358,115 +1065,34 @@ router.put("/update-invoice-products/:invoiceNumber", async (req, res) => {
       throw new Error("Failed to update invoice");
     }
 
-    invoiceUpdated = true;
-    console.log(`✅ [${requestId}] Invoice update completed`);
-
-    // 5C: Update customer loyalty coins if needed
-    const loyaltyCoinsDifference = newLoyaltyCoinsEarned - (originalInvoice.loyaltyCoinsEarned || 0);
-
-    if (loyaltyCoinsDifference !== 0 && originalInvoice.customer?.customerId) {
-      try {
-        console.log(`🪙 [${requestId}] Updating customer loyalty coins...`);
-
-        const customerResponse = await axios.put(
-          `${process.env.VITE_API_URL}/customer/update-loyalty-coins/${originalInvoice.customer.customerId}`,
-          {
-            coinsEarned: loyaltyCoinsDifference > 0 ? loyaltyCoinsDifference : 0,
-            coinsUsed: 0
-          }
-        );
-
-        loyaltyCoinsUpdated = true;
-        console.log(`✅ [${requestId}] Customer loyalty coins updated`);
-      } catch (customerError) {
-        console.error(`❌ [${requestId}] Failed to update customer loyalty coins:`, customerError.message);
-        // Don't throw error - continue with success
-      }
-    }
-
-    // 🛡️ STEP 6: ALL UPDATES SUCCESSFUL - Save history
-    console.log(`🎉 [${requestId}] ALL updates completed successfully!`);
-
-    updateHistory.status = 'SUCCESS';
-    updateHistory.calculationChanges.newTotal = newTotal;
-    updateHistory.calculationChanges.newLoyaltyCoinsEarned = newLoyaltyCoinsEarned;
-    updateHistory.calculationChanges.difference = newTotal - updateHistory.calculationChanges.oldTotal;
-    updateHistory.calculationChanges.loyaltyCoinsDifference = loyaltyCoinsDifference;
-    updateHistory.inventoryUpdates = inventoryChanges.map(change => ({
-      productId: change.productId,
-      batchNumber: change.batchNumber,
-      operation: change.operation,
-      beforeQuantity: change.oldQuantity,
-      afterQuantity: change.newQuantity
-    }));
-
-    await InvoiceUpdateHistory.create(updateHistory);
+    console.log(`✅ [${requestId}] Invoice updated successfully!`);
+    console.log(`📊 [${requestId}] Final result:`, {
+      invoiceNumber: updatedInvoice.invoiceNumber,
+      oldTotal: originalInvoice.total,
+      newTotal: updatedInvoice.total,
+      itemsCount: updatedInvoice.items.length
+    });
 
     res.status(200).json({
       success: true,
-      message: "Invoice products updated successfully",
+      message: "Invoice products updated successfully with proper recalculation",
       data: updatedInvoice,
-      updateSummary: {
-        itemsAdded: updateHistory.changes.itemsAdded.length,
-        itemsRemoved: updateHistory.changes.itemsRemoved.length,
-        itemsUpdated: updateHistory.changes.itemsUpdated.length,
-        totalChange: updateHistory.calculationChanges.difference,
-        loyaltyCoinsChange: updateHistory.calculationChanges.loyaltyCoinsDifference
+      calculationSummary: {
+        oldTotal: originalInvoice.total,
+        newTotal: updatedInvoice.total,
+        difference: (originalInvoice.total - updatedInvoice.total).toFixed(2),
+        itemsRecalculated: recalculatedItems.length
       }
     });
 
   } catch (error) {
-    // 🛡️ STEP 7: MANUAL ROLLBACK ON ANY ERROR
-    console.error(`💥 [${requestId}] Error occurred - PERFORMING MANUAL ROLLBACK:`, error.message);
-
-    let rollbackErrors = [];
-
-    // Rollback Inventory if it was updated
-    if (inventoryChanges.length > 0) {
-      console.log(`🔄 [${requestId}] Rolling back inventory changes...`);
-
-      for (const change of inventoryChanges) {
-        try {
-          // Restore original quantity
-          change.inventoryItem.batches.find(b => b.batchNumber === change.batchNumber).quantity = change.oldQuantity;
-          await change.inventoryItem.save();
-          console.log(`✅ [${requestId}] Rolled back inventory: ${change.productId} - ${change.batchNumber}`);
-        } catch (rollbackError) {
-          rollbackErrors.push(`Failed to rollback ${change.productId}: ${rollbackError.message}`);
-          console.error(`❌ [${requestId}] Failed to rollback inventory:`, rollbackError.message);
-        }
-      }
-    }
-
-    // Save failed history with rollback info
-    await InvoiceUpdateHistory.create({
-      updateId: updateHistoryId,
-      originalInvoiceNumber: req.params.invoiceNumber,
-      updatedBy: req.body.userDetails,
-      status: 'FAILED_WITH_ROLLBACK',
-      errorDetails: error.message,
-      rollbackPerformed: inventoryChanges.length > 0,
-      rollbackErrors: rollbackErrors,
-      inventoryChangesAttempted: inventoryChanges.map(c => ({
-        productId: c.productId,
-        batchNumber: c.batchNumber,
-        operation: c.operation
-      })),
-      invoiceUpdated: invoiceUpdated,
-      loyaltyCoinsUpdated: loyaltyCoinsUpdated,
-      timestamp: new Date()
-    });
-
-    const errorMessage = rollbackErrors.length > 0
-      ? `Failed to update invoice products - partial rollback performed. Errors: ${rollbackErrors.join(', ')}`
-      : "Failed to update invoice products - all changes rolled back successfully";
+    console.error(`💥 [${requestId}] Error in invoice products update:`, error);
 
     res.status(500).json({
       success: false,
-      message: errorMessage,
+      message: "Failed to update invoice products",
       error: error.message,
-      requestId: requestId,
-      rollbackPerformed: inventoryChanges.length > 0
+      requestId: requestId
     });
   }
 });
